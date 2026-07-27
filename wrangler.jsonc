@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-27",
   "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "single-page-application" },
-  "d1_databases": [{ "binding": "DB", "database_name": "fifa-network-db", "database_id": "REPLACE_WITH_D1_DATABASE_ID", "migrations_dir": "migrations" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "fifa-network-db", "database_id": "8f83c7bf-3ef2-41b8-8bbc-5f3b4f7f0cf2", "migrations_dir": "migrations" }],
   "ai": { "binding": "AI" },
   "triggers": { "crons": ["15 2 * * *"] },
   "vars": {
