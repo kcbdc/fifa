@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fifa-network-lab",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "single-page-application" },
+  "d1_databases": [{ "binding": "DB", "database_name": "fifa-network-db", "database_id": "REPLACE_WITH_D1_DATABASE_ID", "migrations_dir": "migrations" }],
+  "ai": { "binding": "AI" },
+  "triggers": { "crons": ["15 2 * * *"] },
+  "vars": {
+    "APP_NAME": "FIFA Network Lab",
+    "DATA_WINDOW_YEARS": "4",
+    "FIFA_RANKING_URL": "",
+    "MATCH_API_URL": "",
+    "GITHUB_OWNER": "",
+    "GITHUB_REPO": ""
+  }
+}

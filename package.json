@@ -1,0 +1,21 @@
+{
+  "name": "fifa-network-lab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 migrations apply fifa-network-db --local",
+    "db:remote": "wrangler d1 migrations apply fifa-network-db --remote",
+    "seed:local": "wrangler d1 execute fifa-network-db --local --file=./scripts/seed.sql",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests.mjs",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260725.0",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.26.0"
+  }
+}
