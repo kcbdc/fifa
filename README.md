@@ -22,3 +22,7 @@ npm run dev
 
 ## 배포
 상세 절차는 `SETUP_KO.md` 참고.
+
+## v2 자동수집 어댑터
+
+`PROVIDER_SETUP_KO.md`를 참고하십시오. Sportradar FIFA Rankings와 Daily Summaries JSON 매핑, 국가대표 코드 필터, 최근 4년 분할 백필 커서가 포함되어 있습니다.

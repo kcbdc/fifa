@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fifa-network-lab",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "single-page-application" },
+  "d1_databases": [{ "binding": "DB", "database_name": "fifa-network-db", "database_id": "REPLACE_WITH_D1_DATABASE_ID", "migrations_dir": "migrations" }],
+  "ai": { "binding": "AI" },
+  "triggers": { "crons": ["15 2 * * *"] },
+  "vars": {
+    "APP_NAME": "FIFA Network Lab",
+    "DATA_WINDOW_YEARS": "4",
+    "DATA_PROVIDER": "footballdata",
+    "SPORTRADAR_ACCESS_LEVEL": "trial",
+    "SPORTRADAR_LANGUAGE": "en",
+    "BACKFILL_DAYS_PER_RUN": "7",
+    "MATCH_WINDOW_DAYS": "31",
+    "RANKING_BACKFILL_PER_RUN": "2",
+    "FIFA_RANKING_URL": "https://footballdata.io/api/v1/fifa-rankings/current?ranking_type=men&limit=100",
+    "FOOTBALLDATA_PERIODS_URL": "https://footballdata.io/api/v1/fifa-rankings/periods?ranking_type=men&limit=100",
+    "MATCH_API_URL": "https://footballdata.io/api/v1/fixtures/results?from={from}&to={to}&limit=100&page={page}",
+    "COUNTRY_API_URL": "https://footballdata.io/api/v1/countries?limit=100",
+    "GITHUB_OWNER": "",
+    "GITHUB_REPO": ""
+  }
+}
