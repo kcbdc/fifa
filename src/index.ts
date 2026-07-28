@@ -21,6 +21,16 @@ const yearsAgo=(years:number)=>{const d=new Date();d.setUTCFullYear(d.getUTCFull
 const asArray=(x:any):any[]=>Array.isArray(x)?x:[];
 const n=(x:any, fallback=0)=>Number.isFinite(Number(x))?Number(x):fallback;
 const cleanCode=(x:any)=>String(x||'').trim().toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);
+class ApiHttpError extends Error { constructor(public status:number, public url:string, public payload:any){super(formatApiError(status,payload,url));} }
+function formatApiError(status:number,payload:any,url:string){
+ const code=payload?.error?.code||payload?.code||''; const msg=payload?.error?.message||payload?.message||'';
+ if(code==='missing_api_key') return `API 키가 요청 헤더에 전달되지 않았습니다. Cloudflare Secret FOOTBALLDATA_API_KEY와 재배포 여부를 확인하세요. (${status})`;
+ if(code==='invalid_api_key'||code==='api_key_inactive'||code==='revoked_api_key') return `API 키가 유효하지 않거나 비활성 상태입니다. 공급자 대시보드에서 키 상태를 확인하세요. (${code})`;
+ if(status===403 && /starter|plan|subscription|upgrade|access/i.test(`${code} ${msg}`)) return `현재 요금제에서 이 엔드포인트를 사용할 수 없습니다. FIFA 랭킹은 Starter 이상이 필요할 수 있습니다. (${msg||code||'HTTP 403'})`;
+ if(status===403) return `접근이 거부되었습니다. API 키 상태 또는 요금제 권한을 확인하세요. ${msg||code||url}`;
+ if(status===429) return `API 호출 한도를 초과했습니다. 잠시 후 다시 실행하거나 수집 범위를 줄이세요.`;
+ return `HTTP ${status}: ${msg||code||url}`;
+}
 
 async function dashboard(e:Env){
  const [teams,matches,rankings,issues,latest,runs,jobs]=await Promise.all([
@@ -55,7 +65,7 @@ function providerInfo(e:Env){
    periodsUrl:e.FOOTBALLDATA_PERIODS_URL||`${base}/fifa-rankings/periods?ranking_type=men&limit=100`,
    matchTemplate:e.MATCH_API_URL||`${base}/fixtures/results?from={from}&to={to}&limit=100&page={page}`,
    countryUrl:e.COUNTRY_API_URL||`${base}/countries?limit=100`,
-   hasApiKey:Boolean(e.FOOTBALLDATA_API_KEY),
+   hasApiKey:Boolean(e.FOOTBALLDATA_API_KEY?.trim()),
    backfillDaysPerRun:Number(e.MATCH_WINDOW_DAYS||31),
    rankingBackfillPerRun:Number(e.RANKING_BACKFILL_PER_RUN||2)
   };
@@ -75,13 +85,31 @@ function providerInfo(e:Env){
 function providerHeaders(e:Env):Record<string,string>{
  const p=(e.DATA_PROVIDER||'footballdata').toLowerCase();
  if(p==='sportradar') return {'accept':'application/json','x-api-key':e.SPORTRADAR_API_KEY||''};
- if(p==='footballdata') return {'accept':'application/json','authorization':`Bearer ${e.FOOTBALLDATA_API_KEY||''}`};
+ if(p==='footballdata'){ const key=e.FOOTBALLDATA_API_KEY?.trim(); return key?{'accept':'application/json','authorization':`Bearer ${key}`}:{'accept':'application/json'}; }
  return {'accept':'application/json'};
 }
 async function fetchJson(url:string,e:Env){
- const res=await fetch(url,{headers:{...providerHeaders(e),'user-agent':'FIFA-Network-Lab/2.0'}});
- if(!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
- return await res.json() as AnyObj;
+ const headers={...providerHeaders(e),'user-agent':'FIFA-Network-Lab/4.0'};
+ const res=await fetch(url,{headers});
+ const text=await res.text(); let payload:any={};
+ try{payload=text?JSON.parse(text):{}}catch{payload={message:text.slice(0,500)}}
+ if(!res.ok) throw new ApiHttpError(res.status,url,payload);
+ return payload as AnyObj;
+}
+async function testProvider(e:Env){
+ const info=providerInfo(e) as any;
+ const endpoints=[
+  {name:'account',url:'https://footballdata.io/api/v1/account/usage'},
+  {name:'countries',url:info.countryUrl},
+  {name:'rankings',url:info.rankingUrl},
+  {name:'matches',url:info.matchTemplate.replace('{from}',isoDate(new Date())).replace('{to}',isoDate(new Date())).replace('{page}','1')}
+ ];
+ const results=[] as any[];
+ for(const ep of endpoints){
+  try{const data=await fetchJson(ep.url,e);results.push({name:ep.name,ok:true,status:200,url:ep.url,sampleKeys:Object.keys(data||{}).slice(0,10)});}
+  catch(err){if(err instanceof ApiHttpError)results.push({name:ep.name,ok:false,status:err.status,url:ep.url,error:err.message,providerPayload:err.payload});else results.push({name:ep.name,ok:false,status:0,url:ep.url,error:String(err)});}
+ }
+ return {ok:results.every(x=>x.ok),hasApiKey:info.hasApiKey,provider:info.provider,results};
 }
 async function upsertTeam(e:Env, code:string, name:string, conf='UNK'){
  code=cleanCode(code); if(!code||!name) return null;
@@ -134,6 +162,16 @@ function rowsFrom(data:AnyObj){
  if(Array.isArray(data?.matches)) return data.matches;
  if(Array.isArray(data?.rankings)) return data.rankings;
  return [];
+}
+async function ingestFootballdataCountries(data:AnyObj,e:Env){
+ let inserted=0,warnings=0;
+ for(const row of rowsFrom(data)){
+  const code=cleanCode(row.iso3||row.country_code||row.code||row.abbreviation);
+  const name=row.name||row.country_name||row.official_name||code;
+  if(!code||!name){warnings++;continue}
+  const t=await upsertTeam(e,code,name,row.confederation?.code||row.confederation||'UNK');if(t)inserted++;else warnings++;
+ }
+ return {inserted,warnings};
 }
 async function ingestFootballdataRankings(data:AnyObj,e:Env,sourceUrl:string){
  let inserted=0,warnings=0;
@@ -198,9 +236,13 @@ async function collect(e:Env,opts:{date?:string;rankingOnly?:boolean;matchesOnly
   if(!info.hasApiKey) throw new Error(`${info.provider} API key is not configured`);
   if(!opts.matchesOnly){
    if(info.provider==='footballdata'){
-    const current=await fetchAllPages(info.rankingUrl.includes('{page}')?info.rankingUrl:`${info.rankingUrl}&page={page}`,e,5);
-    const r=await ingestFootballdataRankings(current,e,info.rankingUrl);inserted+=r.inserted;warnings+=r.warnings;messages.push(`current rankings ${r.inserted}`);
-    const h=await collectFootballdataRankingHistory(e,info);inserted+=h.inserted;warnings+=h.warnings;messages.push(...h.messages);
+    // 무료 플랜에서도 국가·경기 수집은 계속하고, 랭킹 권한 오류는 경고로 분리한다.
+    try{const countries=await fetchAllPages(info.countryUrl.includes('{page}')?info.countryUrl:`${info.countryUrl}&page={page}`,e,5);const cr=await ingestFootballdataCountries(countries,e);inserted+=cr.inserted;warnings+=cr.warnings;messages.push(`countries ${cr.inserted}`);}catch(err){warnings++;messages.push(`countries warning: ${err instanceof Error?err.message:String(err)}`)}
+    try{
+     const current=await fetchAllPages(info.rankingUrl.includes('{page}')?info.rankingUrl:`${info.rankingUrl}&page={page}`,e,5);
+     const r=await ingestFootballdataRankings(current,e,info.rankingUrl);inserted+=r.inserted;warnings+=r.warnings;messages.push(`current rankings ${r.inserted}`);
+     const h=await collectFootballdataRankingHistory(e,info);inserted+=h.inserted;warnings+=h.warnings;messages.push(...h.messages);
+    }catch(err){warnings++;messages.push(`rankings unavailable: ${err instanceof Error?err.message:String(err)}`)}
    }else{
     const data=await fetchJson(info.rankingUrl,e);const r=await ingestSportradarRankings(data,e,info.rankingUrl);inserted+=r.inserted;warnings+=r.warnings;messages.push(`rankings ${r.inserted}`);
    }
@@ -242,9 +284,10 @@ async function explain(r:Request,e:Env){const b=await r.json() as any;const prom
 export default {async fetch(r:Request,e:Env):Promise<Response>{const u=new URL(r.url);try{
  if(u.pathname==='/api/health')return json({ok:true,app:e.APP_NAME,time:new Date().toISOString(),provider:providerInfo(e)});
  if(u.pathname==='/api/provider')return json(providerInfo(e));
+ if(u.pathname==='/api/provider/test')return json(await testProvider(e));
  if(u.pathname==='/api/dashboard')return json(await dashboard(e));if(u.pathname==='/api/network')return json(await network(e,u));if(u.pathname==='/api/rankings')return json(await rankings(e));if(u.pathname==='/api/quality')return json(await quality(e));
  if(u.pathname==='/api/collect'&&r.method==='POST'){if(!auth(r,e))return bad('Unauthorized',401);const b=await r.json().catch(()=>({})) as any;return json(await collect(e,{date:b.date,rankingOnly:b.rankingOnly,matchesOnly:b.matchesOnly}));}
  if(u.pathname==='/api/import'&&r.method==='POST')return json(await csvImport(r,e));if(u.pathname==='/api/models'&&r.method==='POST')return json(await modelRun(r,e));if(u.pathname==='/api/explain'&&r.method==='POST')return json(await explain(r,e));
- if(u.pathname==='/api/export'){const [t,m,ra]=await Promise.all([e.DB.prepare('SELECT * FROM teams').all(),e.DB.prepare('SELECT * FROM matches').all(),e.DB.prepare('SELECT * FROM rankings').all()]);return json({metadata:{exportedAt:new Date().toISOString(),version:'2.0.0',provider:providerInfo(e)},teams:t.results,matches:m.results,rankings:ra.results});}
+ if(u.pathname==='/api/export'){const [t,m,ra]=await Promise.all([e.DB.prepare('SELECT * FROM teams').all(),e.DB.prepare('SELECT * FROM matches').all(),e.DB.prepare('SELECT * FROM rankings').all()]);return json({metadata:{exportedAt:new Date().toISOString(),version:'4.0.0',provider:providerInfo(e)},teams:t.results,matches:m.results,rankings:ra.results});}
  if(u.pathname.startsWith('/api/'))return bad('Not found',404);return e.ASSETS.fetch(r);
  }catch(err){return bad(err instanceof Error?err.message:String(err),500)}},async scheduled(_c:ScheduledController,e:Env,ctx:ExecutionContext){ctx.waitUntil(collect(e))}};
