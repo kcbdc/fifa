@@ -14,5 +14,14 @@
     "MATCH_API_URL": "",
     "GITHUB_OWNER": "",
     "GITHUB_REPO": ""
-  }
+  },
+"kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "299fa5cfb19c454b805e459c105ed17b",
+      
+      // Optional: preview_id used when running `wrangler dev` for local dev
+      "preview_id": "<ID_OF_PREVIEW_KV_NAMESPACE_FOR_LOCAL_DEVELOPMENT>"
+    }
+  ]
 }
