@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-27",
   "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "single-page-application" },
-  "d1_databases": [{ "binding": "DB", "database_name": "fifa-network-db", "database_id": "REPLACE_WITH_D1_DATABASE_ID", "migrations_dir": "migrations" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "fifa-network-db", "database_id": "8f83c7bf-3ef2-41b8-8bbc-5f3b4f7f0cf2", "migrations_dir": "migrations" }],
   "ai": { "binding": "AI" },
   "triggers": { "crons": ["15 2 * * *"] },
   "vars": {
@@ -22,5 +22,15 @@
     "COUNTRY_API_URL": "https://footballdata.io/api/v1/countries?limit=100",
     "GITHUB_OWNER": "",
     "GITHUB_REPO": ""
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "299fa5cfb19c454b805e459c105ed17b",
+      
+      // Optional: preview_id used when running `wrangler dev` for local dev
+      "preview_id": "<ID_OF_PREVIEW_KV_NAMESPACE_FOR_LOCAL_DEVELOPMENT>"
+    }
+  ]
+
 }
