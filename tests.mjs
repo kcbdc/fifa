@@ -27,3 +27,18 @@ test('v8 validation and robust R conversion',()=>{
   assert.match(r,/data-validation\.json/);
   assert.match(js,/validateModel/);
 });
+
+
+test('v9 GitHub diagnostics and ERGM fallback',()=>{
+ const ts=fs.readFileSync('src/index.ts','utf8');
+ const js=fs.readFileSync('public/app.js','utf8');
+ const html=fs.readFileSync('public/index.html','utf8');
+ const r=fs.readFileSync('r-analysis/run_ergm.R','utf8');
+ assert.match(ts,/api\/github\/diagnostics/);
+ assert.match(ts,/githubDiagnostics/);
+ assert.match(ts,/GITHUB_DISPATCH_MODE/);
+ assert.match(js,/githubDiagBtn/);
+ assert.match(html,/GitHub 연결 진단/);
+ assert.match(r,/candidate_rhs/);
+ assert.match(r,/fallback_used/);
+});

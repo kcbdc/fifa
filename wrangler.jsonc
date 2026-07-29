@@ -28,6 +28,8 @@
     "APP_NAME": "FIFA Network Lab",
     "GITHUB_OWNER": "REPLACE_WITH_GITHUB_OWNER",
     "GITHUB_REPO": "REPLACE_WITH_GITHUB_REPO",
+    "GITHUB_WORKFLOW_FILE": "analyze.yml",
+    "GITHUB_DISPATCH_MODE": "auto",
     "PUBLIC_BASE_URL": "https://fifa-network-lab.junewoopark16.workers.dev",
     "DATA_WINDOW_YEARS": "4",
     "BATCH_STATEMENTS": "75",
@@ -36,14 +38,5 @@
     "WORLD_BANK_GDP_URL": "https://api.worldbank.org/v2/country/all/indicator/NY.GDP.PCAP.CD?format=json&per_page=20000&date=2022:2026",
     "WORLD_BANK_POP_URL": "https://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL?format=json&per_page=20000&date=2022:2026",
     "FREE_RANKING_CSV_URL": "https://raw.githubusercontent.com/Dato-Futbol/fifa-ranking/refs/heads/master/ranking_fifa_historical.csv"
- },
-  "kv_namespaces": [
-    {
-      "binding": "KV",
-      "id": "299fa5cfb19c454b805e459c105ed17b",
-      
-      // Optional: preview_id used when running `wrangler dev` for local dev
-      "preview_id": "<ID_OF_PREVIEW_KV_NAMESPACE_FOR_LOCAL_DEVELOPMENT>"
-    }
-  ]
+  }
 }

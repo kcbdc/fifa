@@ -134,8 +134,33 @@ tryCatch({
   if (!nzchar(trimws(rhs))) rhs <- "edges"
   f <- as.formula(paste("net ~", rhs))
 
-  fit <- ergm(f, control = control.ergm(MCMLE.maxit = 20, MCMC.burnin = 10000,
-                                         MCMC.interval = 1000, seed = 20260728))
+  requested_formula <- paste(deparse(f), collapse = "")
+  candidate_rhs <- unique(c(
+    rhs,
+    trimws(gsub("\\+?\\s*gwesp\\([^)]*\\)", "", rhs, perl = TRUE)),
+    trimws(gsub("\\+?\\s*mutual", "", gsub("\\+?\\s*gwesp\\([^)]*\\)", "", rhs, perl = TRUE), perl = TRUE)),
+    "edges"
+  ))
+  candidate_rhs <- vapply(candidate_rhs, function(z) {
+    z <- gsub("\\+\\s*\\+", "+", z)
+    z <- gsub("^\\s*\\+|\\+\\s*$", "", z)
+    if (!nzchar(trimws(z))) "edges" else trimws(z)
+  }, character(1))
+  attempts <- list(); fit <- NULL; effective_formula <- NULL
+  for (candidate in candidate_rhs) {
+    candidate_f <- as.formula(paste("net ~", candidate))
+    attempt <- tryCatch({
+      candidate_fit <- ergm(candidate_f, control = control.ergm(MCMLE.maxit = 20,
+        MCMC.burnin = 10000, MCMC.interval = 1000, seed = 20260728))
+      list(ok = TRUE, fit = candidate_fit)
+    }, error = function(err) list(ok = FALSE, error = conditionMessage(err)))
+    attempts[[length(attempts)+1L]] <- list(formula = paste(deparse(candidate_f), collapse = ""), ok = attempt$ok,
+      error = if (attempt$ok) NULL else attempt$error)
+    if (attempt$ok) { fit <- attempt$fit; effective_formula <- candidate_f; break }
+    message("ERGM candidate failed: ", candidate, " -> ", attempt$error)
+  }
+  if (is.null(fit)) stop(paste("All ERGM candidate models failed:", paste(vapply(attempts, function(x) paste0(x$formula, ": ", x$error), character(1)), collapse = " | ")))
+  f <- effective_formula
   coef_summary <- coef(summary(fit))
   if (is.null(dim(coef_summary))) coef_summary <- matrix(coef_summary, nrow = 1)
   col_names <- colnames(coef_summary)
@@ -165,13 +190,13 @@ tryCatch({
   converged <- all(is.finite(coef_mat$estimate))
   coefficient_rows <- lapply(seq_len(nrow(coef_mat)), function(i) as.list(coef_mat[i, , drop = FALSE]))
   result <- list(run_id = as.integer(run_id), status = "completed", converged = converged,
-                 formula = paste(deparse(f), collapse = ""), network_type = as.character(run$network_type),
+                 formula = paste(deparse(f), collapse = ""), requested_formula = requested_formula, fallback_used = !identical(requested_formula, paste(deparse(f), collapse = "")), model_attempts = attempts, network_type = as.character(run$network_type),
                  node_count = network.size(net), edge_count = network.edgecount(net),
                  input_counts = list(teams = nrow(teams), matches = nrow(matches), rankings = nrow(rankings)),
                  aic = unname(AIC(fit)), bic = unname(BIC(fit)), coefficients = coefficient_rows,
                  validation = validation)
   diagnostics <- list(seed = 20260728, session = capture.output(sessionInfo()),
-                      gof = capture.output(print(gof_obj)), coefficient_columns = col_names)
+                      gof = capture.output(print(gof_obj)), coefficient_columns = col_names, model_attempts = attempts)
   write_json(list(result = result, diagnostics = diagnostics), "artifacts/model-result.json",
              pretty = TRUE, auto_unbox = TRUE, null = "null")
   writeLines(c(sprintf("Input: teams=%d matches=%d rankings=%d", nrow(teams), nrow(matches), nrow(rankings)),
