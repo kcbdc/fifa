@@ -1,6 +1,21 @@
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
-async function api(path,opt){const r=await fetch(path,opt);let d;try{d=await r.json()}catch{d={error:await r.text()}}if(!r.ok)throw new Error(d.error||'요청 실패');return d}
+function adminToken(){return localStorage.getItem('fnl_admin_token')||''}
+function saveAdminToken(v){if(v)localStorage.setItem('fnl_admin_token',v);else localStorage.removeItem('fnl_admin_token')}
+async function api(path,opt={}){
+  const t=adminToken(),headers={...(opt.headers||{})};
+  if(t&&!headers.authorization&&!headers.Authorization)headers.authorization=`Bearer ${t}`;
+  const r=await fetch(path,{...opt,headers});
+  let d;try{d=await r.json()}catch{d={error:await r.text()}}
+  if(!r.ok)throw new Error(d.error||(r.status===401?'인증 실패: 우측 상단에서 관리자 토큰을 저장하세요.':'요청 실패'));
+  return d
+}
 function show(view){$$('.view').forEach(x=>x.classList.toggle('active',x.id===view));window.scrollTo(0,0);if(view==='home')init();if(view==='model')autoGithubDiagnostic();if(view==='analytics')loadAnalytics()}
+function refreshAdminTokenStatus(){const t=adminToken();$('#adminTokenStatus').textContent=t?'저장됨':'미설정(관리자 기능 사용 불가)';$('#adminTokenStatus').className=t?'good':'warn'}
+if($('#adminTokenInput')){
+  $('#adminTokenInput').value=adminToken();
+  refreshAdminTokenStatus();
+  $('#adminTokenSaveBtn').onclick=()=>{saveAdminToken($('#adminTokenInput').value.trim());refreshAdminTokenStatus()};
+}
 $$('nav button').forEach(b=>b.onclick=()=>show(b.dataset.view));
 function card(k,v){return `<div class="metric"><span>${k}</span><b>${v??'-'}</b></div>`}
 function setHealth(kind,text,detail=''){const el=$('#health');if(!el)return;const cls=kind==='good'?'good':kind==='warn'?'warn':'bad';el.innerHTML=`<span class="${cls}">● ${text}</span>${detail?`<small>${detail}</small>`:''}`}
@@ -33,7 +48,37 @@ function download(name,obj){const a=document.createElement('a');a.href=URL.creat
 $('#exportBtn').onclick=$('#paperExport').onclick=async()=>download('fifa-network-research-data.json',await api('/api/export'));
 $('#reproExport').onclick=async()=>download('fifa-network-reproducibility-v13.json',await api('/api/reproducibility'));
 $('#interpretLatest').onclick=async()=>{try{const d=await api('/api/interpret');$('#paperInsight').innerHTML=`<b>${d.headline}</b><p>${d.summary}</p><ul>${(d.cautions||[]).map(x=>`<li>${x}</li>`).join('')}</ul>`}catch(e){$('#paperInsight').textContent=e.message}};
-$('#importBtn').onclick=async()=>{const f=$('#fileInput').files[0];if(!f)return alert('파일을 선택하세요');let rows;if(f.name.endsWith('.json'))rows=JSON.parse(await f.text());else{const [head,...lines]=(await f.text()).trim().split(/\r?\n/);const keys=head.split(',').map(x=>x.trim());rows=lines.map(l=>Object.fromEntries(l.split(',').map((v,i)=>[keys[i],v.trim()])))}$('#log').textContent=JSON.stringify(await api('/api/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:$('#importKind').value,rows})}),null,2)};
+$('#importBtn').onclick=async()=>{
+  const f=$('#fileInput').files[0];if(!f)return alert('파일을 선택하세요');
+  const btn=$('#importBtn'),orig=btn.textContent;btn.disabled=true;btn.textContent='가져오는 중...';$('#log').textContent='업로드 처리 중...';
+  try{
+    let rows;
+    if(f.name.endsWith('.json')){rows=JSON.parse(await f.text())}
+    else{
+      const text=(await f.text()).trim();
+      const lines=[];let row=[],cell='',q=false;
+      for(let i=0;i<text.length;i++){const c=text[i],n=text[i+1];
+        if(q){if(c==='"'&&n==='"'){cell+='"';i++}else if(c==='"')q=false;else cell+=c}
+        else if(c==='"')q=true;
+        else if(c===','){row.push(cell);cell=''}
+        else if(c==='\n'){row.push(cell.replace(/\r$/,''));lines.push(row);row=[];cell=''}
+        else cell+=c}
+      if(cell||row.length){row.push(cell);lines.push(row)}
+      const head=lines.shift().map(x=>x.trim());
+      rows=lines.filter(r=>r.some(Boolean)).map(r=>Object.fromEntries(head.map((k,i)=>[k,(r[i]??'').trim()])))
+    }
+    const d=await api('/api/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:$('#importKind').value,rows})});
+    $('#log').textContent=JSON.stringify(d,null,2);
+    await init();
+  }catch(e){$('#log').textContent=`업로드 실패: ${e.message}`}
+  finally{btn.disabled=false;btn.textContent=orig}
+};
+$('#normalizeBtn').onclick=async()=>{
+  const btn=$('#normalizeBtn'),orig=btn.textContent;btn.disabled=true;btn.textContent='정규화 중...';$('#log').textContent='FIFA 211 정규화 실행 중...';
+  try{const d=await api('/api/fifa-normalize',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});$('#log').textContent=JSON.stringify(d,null,2);await init()}
+  catch(e){$('#log').textContent=`정규화 실패: ${e.message}`}
+  finally{btn.disabled=false;btn.textContent=orig}
+};
 function formula(){const terms=$$('.term:checked').map(x=>x.value);const f=`network ~ ${terms.join(' + ')||'edges'}`;$('#formula').textContent=f;return f}$$('.term').forEach(x=>x.onchange=formula);formula();
 
 
