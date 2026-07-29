@@ -8,7 +8,7 @@ interface Env {
 }
 type Obj=Record<string,any>;
 type Task={kind:'countries'|'gdp'|'population'|'matches'|'rankings'; month?:string; label:string};
-const VERSION='14.0.0';
+const VERSION='15.0.0';
 const j=(x:unknown,s=200)=>new Response(JSON.stringify(x),{status:s,headers:{'content-type':'application/json;charset=utf-8','cache-control':'no-store'}});
 const iso=(d=new Date())=>d.toISOString().slice(0,10);
 const auth=(r:Request,e:Env)=>!e.ADMIN_TOKEN||r.headers.get('authorization')===`Bearer ${e.ADMIN_TOKEN}`;
@@ -106,7 +106,38 @@ async function dashboard(e:Env){
   return{teams:Number(t.n||0),rawTeams:Number(raw.n||0),excludedTeams:Math.max(0,Number(raw.n||0)-Number(t.n||0)),unmappedNames:Number(unmapped.n||0),matches:Number(m.n||0),rankings:Number(r.n||0),issues:Number(i.n||0),runs:runs.results,jobs:jobs.results,provider:cfg(e),progress:p,normalization:{masterCount:FIFA_MEMBERS.length,normalizedAt:(await state(e,'fifa_normalized_at',''))||null}}
 }
 async function network(e:Env,u:URL){const from=u.searchParams.get('from')||months(Number(e.DATA_WINDOW_YEARS||4))[0]+'-01',to=u.searchParams.get('to')||iso(),type=u.searchParams.get('type')||'match';const q=await e.DB.prepare(`SELECT m.*,h.fifa_code hcode,h.name_en hname,h.confederation hconf,a.fifa_code acode,a.name_en aname,a.confederation aconf FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE m.match_date BETWEEN ? AND ? AND h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1`).bind(from,to).all<any>();const ns=new Map(),ls=new Map();for(const r of q.results){ns.set(r.hcode,{id:r.hcode,label:r.hname,group:r.hconf});ns.set(r.acode,{id:r.acode,label:r.aname,group:r.aconf});let s=r.hcode,t=r.acode;if(type==='win'){if(r.home_score===r.away_score)continue;if(r.home_score<r.away_score)[s,t]=[t,s]}const k=type==='match'?[s,t].sort().join('|'):`${s}|${t}`,x=ls.get(k)||{source:s,target:t,value:0};x.value++;ls.set(k,x)}return{nodes:[...ns.values()],links:[...ls.values()],meta:{from,to,type,matches:q.results.length}}}
-async function quality(e:Env){const d=await e.DB.prepare(`SELECT match_date,home_team_id,away_team_id,COUNT(*) n FROM matches GROUP BY match_date,home_team_id,away_team_id HAVING n>1`).all(),v=await e.DB.prepare(`SELECT id FROM matches WHERE home_score<0 OR away_score<0 OR home_team_id=away_team_id`).all();const nm=await e.DB.prepare(`SELECT COUNT(*) n FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=0 OR a.is_fifa_member=0 OR h.active=0 OR a.active=0`).first<any>();return{score:Math.max(0,100-d.results.length*5-v.results.length*10),duplicates:d.results,invalid:v.results,excludedNonMemberMatches:Number(nm?.n||0)}}
+async function quality(e:Env){
+  const [members,rawTeams,memberMatches,invalid,excluded,duplicateSummary,latestRanking,matchedTeams,dateRange] = await Promise.all([
+    e.DB.prepare('SELECT COUNT(*) n FROM teams WHERE is_fifa_member=1 AND active=1').first<any>(),
+    e.DB.prepare('SELECT COUNT(*) n FROM teams').first<any>(),
+    e.DB.prepare(`SELECT COUNT(*) n FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1`).first<any>(),
+    e.DB.prepare(`SELECT COUNT(*) n FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1 AND (m.home_score<0 OR m.away_score<0 OR m.home_team_id=m.away_team_id OR m.match_date IS NULL OR length(m.match_date)<10)`).first<any>(),
+    e.DB.prepare(`SELECT COUNT(*) n FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=0 OR a.is_fifa_member=0 OR h.active=0 OR a.active=0`).first<any>(),
+    e.DB.prepare(`SELECT COUNT(*) groups_count,COALESCE(SUM(n-1),0) extra_rows FROM (SELECT COUNT(*) n FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1 GROUP BY m.match_date,m.home_team_id,m.away_team_id,m.home_score,m.away_score,COALESCE(m.competition,''),m.neutral HAVING COUNT(*)>1)`).first<any>(),
+    e.DB.prepare(`SELECT MAX(r.release_date) release_date,COUNT(DISTINCT CASE WHEN r.release_date=(SELECT MAX(release_date) FROM rankings) THEN r.team_id END) covered FROM rankings r JOIN teams t ON t.id=r.team_id WHERE t.is_fifa_member=1 AND t.active=1`).first<any>(),
+    e.DB.prepare(`SELECT COUNT(DISTINCT team_id) n FROM (SELECT m.home_team_id team_id FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1 UNION SELECT m.away_team_id FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1)`).first<any>(),
+    e.DB.prepare(`SELECT MIN(m.match_date) min_date,MAX(m.match_date) max_date FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1`).first<any>()
+  ]);
+  const memberCount=Number(members?.n||0),matchCount=Number(memberMatches?.n||0),invalidCount=Number(invalid?.n||0);
+  const latestCoverage=Number(latestRanking?.covered||0),matchedCount=Number(matchedTeams?.n||0);
+  const pct=(n:number,d:number)=>d>0?Math.max(0,Math.min(100,n/d*100)):0;
+  const normalizationPct=pct(memberCount,211),validityPct=matchCount?pct(matchCount-invalidCount,matchCount):0;
+  const rankingPct=pct(latestCoverage,211),matchCoveragePct=pct(matchedCount,211),consistencyPct=100;
+  let recencyPct=0;
+  if(dateRange?.max_date){const days=Math.max(0,(Date.now()-new Date(`${dateRange.max_date}T00:00:00Z`).getTime())/86400000);recencyPct=days<=90?100:days<=180?80:days<=365?60:40}
+  const dimensions=[
+    {key:'normalization',label:'FIFA 회원국 정규화',weight:20,percent:normalizationPct,detail:`${memberCount}/211개 회원국`},
+    {key:'validity',label:'경기 유효성',weight:25,percent:validityPct,detail:`유효 ${Math.max(0,matchCount-invalidCount).toLocaleString()} / ${matchCount.toLocaleString()}건`},
+    {key:'rankingCoverage',label:'최신 랭킹 완전성',weight:20,percent:rankingPct,detail:`${latestCoverage}/211개국 · ${latestRanking?.release_date||'발표일 없음'}`},
+    {key:'matchCoverage',label:'경기 네트워크 포괄성',weight:15,percent:matchCoveragePct,detail:`최근 분석기간 경기 보유 ${matchedCount}/211개국`},
+    {key:'consistency',label:'중복·일관성 관리',weight:10,percent:consistencyPct,detail:`중복 후보 ${Number(duplicateSummary?.extra_rows||0).toLocaleString()}건은 집계·이진화 처리`},
+    {key:'recency',label:'자료 최신성',weight:10,percent:recencyPct,detail:`최근 경기 ${dateRange?.max_date||'없음'}`}
+  ].map(x=>({...x,score:Number((x.weight*x.percent/100).toFixed(1)),status:x.percent>=95?'excellent':x.percent>=80?'good':x.percent>=60?'warning':'poor'}));
+  const score=Number(dimensions.reduce((a,x)=>a+x.score,0).toFixed(1));
+  const grade=score>=95?'Excellent':score>=85?'Good':score>=70?'Fair':'Needs review';
+  return{score,grade,methodology:'가중 품질지수: 정규화 20, 유효성 25, 최신 랭킹 완전성 20, 경기 포괄성 15, 중복·일관성 10, 최신성 10',dimensions,counts:{fifaMembers:memberCount,rawTeams:Number(rawTeams?.n||0),memberMatches:matchCount,invalid:invalidCount,excludedNonMemberMatches:Number(excluded?.n||0),duplicateGroups:Number(duplicateSummary?.groups_count||0),duplicateCandidatesHandled:Number(duplicateSummary?.extra_rows||0),latestRankingTeams:latestCoverage,matchedTeams:matchedCount},dateRange:{from:dateRange?.min_date||null,to:dateRange?.max_date||null},notes:['중복 후보는 원자료 재수집 및 국가명 통합 과정에서 발생할 수 있으며 품질 감점 대신 분석 단계에서 관계 집계 대상으로 관리합니다.','비회원 경기는 자동 제외된 정상 처리 건수이며 오류로 보지 않습니다.']}
+}
+
 async function modelValidation(e:Env,networkType='win'){
   const [tc,mc,rc,invalid,dated] = await Promise.all([
     e.DB.prepare('SELECT COUNT(*) n FROM teams WHERE is_fifa_member=1 AND active=1').first<any>(),

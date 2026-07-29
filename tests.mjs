@@ -51,7 +51,7 @@ test('v10 immediate dashboard health and fixed GitHub target',()=>{
   assert.match(app,/Promise\.allSettled/);
   assert.match(app,/autoSourceCheck\(\)/);
   assert.match(worker,/async function systemHealth/);
-  assert.match(worker,/VERSION='14\.0\.0'/);
+  assert.match(worker,/VERSION='15\.0\.0'/);
   assert.match(wrangler,/"GITHUB_OWNER": "kcbdc"/);
   assert.match(wrangler,/"GITHUB_REPO": "fifa"/);
   assert.doesNotMatch(wrangler,/REPLACE_WITH_GITHUB_OWNER|REPLACE_WITH_GITHUB_REPO/);
@@ -73,10 +73,10 @@ test('v11 FIFA 211 normalization',()=>{
 });
 
 
-test('v12 advanced research analytics',()=>{const ts=fs.readFileSync('src/index.ts','utf8'),h=fs.readFileSync('public/index.html','utf8'),a=fs.readFileSync('public/app.js','utf8');for(const x of ['/api/analytics','/api/model-comparison','/api/reproducibility','/api/interpret'])assert.ok(ts.includes(x),x);assert.match(ts,/VERSION='14\.0\.0'/);assert.match(h,/고급 네트워크 분석/);assert.match(a,/loadAnalytics/);assert.match(a,/reproExport/)});
+test('v12 advanced research analytics',()=>{const ts=fs.readFileSync('src/index.ts','utf8'),h=fs.readFileSync('public/index.html','utf8'),a=fs.readFileSync('public/app.js','utf8');for(const x of ['/api/analytics','/api/model-comparison','/api/reproducibility','/api/interpret'])assert.ok(ts.includes(x),x);assert.match(ts,/VERSION='15\.0\.0'/);assert.match(h,/고급 네트워크 분석/);assert.match(a,/loadAnalytics/);assert.match(a,/reproExport/)});
 
 
-test('v13 research competitiveness features',()=>{const ts=fs.readFileSync('src/index.ts','utf8'),h=fs.readFileSync('public/index.html','utf8'),a=fs.readFileSync('public/app.js','utf8'),m=fs.readFileSync('migrations/0006_research_competitiveness.sql','utf8');for(const x of ['/api/temporal-network','/api/export/graphml','/api/export/gexf','/api/citation','/api/projects','/api/dataset-freeze','/api/reproducibility-report'])assert.ok(ts.includes(x),x);assert.match(ts,/VERSION='14\.0\.0'/);assert.match(h,/논문 경쟁력 센터/);assert.match(a,/temporalBtn/);assert.match(a,/freezeBtn/);assert.match(m,/CREATE TABLE IF NOT EXISTS research_projects/);assert.match(m,/CREATE TABLE IF NOT EXISTS dataset_snapshots/);});
+test('v13 research competitiveness features',()=>{const ts=fs.readFileSync('src/index.ts','utf8'),h=fs.readFileSync('public/index.html','utf8'),a=fs.readFileSync('public/app.js','utf8'),m=fs.readFileSync('migrations/0006_research_competitiveness.sql','utf8');for(const x of ['/api/temporal-network','/api/export/graphml','/api/export/gexf','/api/citation','/api/projects','/api/dataset-freeze','/api/reproducibility-report'])assert.ok(ts.includes(x),x);assert.match(ts,/VERSION='15\.0\.0'/);assert.match(h,/논문 경쟁력 센터/);assert.match(a,/temporalBtn/);assert.match(a,/freezeBtn/);assert.match(m,/CREATE TABLE IF NOT EXISTS research_projects/);assert.match(m,/CREATE TABLE IF NOT EXISTS dataset_snapshots/);});
 
 
 test("v14 TERGM workflow integration", async () => {
@@ -88,4 +88,14 @@ test("v14 TERGM workflow integration", async () => {
   assert.match(script, /Persist\(~edges\)/);
   assert.match(script, /estimate = "CMLE"/);
   assert.match(worker, /api\/temporal-results/);
+});
+
+
+test('v15 weighted data quality dashboard is present',()=>{
+  const index=fs.readFileSync('src/index.ts','utf8'),app=fs.readFileSync('public/app.js','utf8');
+  assert.match(index,/const VERSION='15\.0\.0'/);
+  assert.match(index,/rankingCoverage/);
+  assert.match(index,/duplicateCandidatesHandled/);
+  assert.match(app,/quality-dimensions/);
+  assert.match(app,/중복 후보 처리/);
 });
