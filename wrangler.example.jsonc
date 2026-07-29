@@ -37,6 +37,7 @@
     "WORLD_BANK_COUNTRY_URL": "https://api.worldbank.org/v2/country?format=json&per_page=400",
     "WORLD_BANK_GDP_URL": "https://api.worldbank.org/v2/country/all/indicator/NY.GDP.PCAP.CD?format=json&per_page=20000&date=2022:2026",
     "WORLD_BANK_POP_URL": "https://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL?format=json&per_page=20000&date=2022:2026",
-    "FREE_RANKING_CSV_URL": "https://raw.githubusercontent.com/Dato-Futbol/fifa-ranking/refs/heads/master/ranking_fifa_historical.csv"
+    "FREE_RANKING_CSV_URL": "https://raw.githubusercontent.com/Dato-Futbol/fifa-ranking/refs/heads/master/ranking_fifa_historical.csv",
+    "LIVE_FIFA_RANKING_URL": "https://www.fifa.com/api/ranking-overview?locale=en"
   }
 }
