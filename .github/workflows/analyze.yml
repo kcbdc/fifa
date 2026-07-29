@@ -1,4 +1,4 @@
-name: ERGM Analysis
+name: ERGM and TERGM Analysis
 
 on:
   workflow_dispatch:
@@ -7,6 +7,15 @@ on:
         description: "D1 model_runs ID"
         required: true
         default: "1"
+      analysis_mode:
+        description: "ergm, tergm, or both"
+        required: true
+        type: choice
+        options:
+          - both
+          - ergm
+          - tergm
+        default: both
   repository_dispatch:
     types: [run-ergm]
 
@@ -16,17 +25,23 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       RUN_ID: ${{ github.event.client_payload.run_id || inputs.run_id }}
+      ANALYSIS_MODE: ${{ github.event.client_payload.analysis_mode || inputs.analysis_mode || 'both' }}
       API_BASE_URL: ${{ secrets.API_BASE_URL }}
       ANALYSIS_API_TOKEN: ${{ secrets.ANALYSIS_API_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: r-lib/actions/setup-r@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
         with:
           use-public-rspm: true
-      - uses: r-lib/actions/setup-r-dependencies@v2
+
+      - name: Install and cache R dependencies
+        uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
             any::jsonlite
@@ -34,17 +49,53 @@ jobs:
             any::network
             any::ergm
             any::sna
-          cache-version: 1
-      - name: Validate secrets
+            any::tergm
+            any::networkDynamic
+            any::tsna
+            any::btergm
+            any::coda
+            any::texreg
+            any::igraph
+          cache-version: 14
+
+      - name: Validate configuration
         shell: bash
         run: |
+          test -n "$RUN_ID" || (echo "RUN_ID is missing" && exit 1)
           test -n "$API_BASE_URL" || (echo "API_BASE_URL secret is missing" && exit 1)
           test -n "$ANALYSIS_API_TOKEN" || (echo "ANALYSIS_API_TOKEN secret is missing" && exit 1)
-      - name: Run ERGM
+          echo "Run ID: $RUN_ID"
+          echo "Analysis mode: $ANALYSIS_MODE"
+
+      - name: Run static ERGM
+        if: env.ANALYSIS_MODE == 'ergm' || env.ANALYSIS_MODE == 'both'
         run: Rscript r-analysis/run_ergm.R "$RUN_ID"
-      - uses: actions/upload-artifact@v4
+
+      - name: Run temporal ERGM
+        if: env.ANALYSIS_MODE == 'tergm' || env.ANALYSIS_MODE == 'both'
+        continue-on-error: true
+        run: Rscript r-analysis/run_tergm.R "$RUN_ID"
+
+      - name: Write workflow manifest
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cat > artifacts/workflow-manifest.json <<EOF
+          {
+            "run_id": "$RUN_ID",
+            "analysis_mode": "$ANALYSIS_MODE",
+            "repository": "${{ github.repository }}",
+            "commit": "${{ github.sha }}",
+            "workflow_run": "${{ github.run_id }}",
+            "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: Upload analysis artifacts
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ergm-results-${{ env.RUN_ID }}
+          name: network-model-results-${{ env.RUN_ID }}
           path: artifacts/
           retention-days: 30
