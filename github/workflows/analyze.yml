@@ -1,17 +1,50 @@
 name: ERGM Analysis
+
 on:
   workflow_dispatch:
     inputs:
-      run_id: { description: 'Model run ID', required: false, default: 'manual' }
+      run_id:
+        description: "D1 model_runs ID"
+        required: true
+        default: "1"
   repository_dispatch:
     types: [run-ergm]
+
+permissions:
+  contents: read
+
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUN_ID: ${{ github.event.client_payload.run_id || inputs.run_id }}
+      API_BASE_URL: ${{ secrets.API_BASE_URL }}
+      ANALYSIS_API_TOKEN: ${{ secrets.ANALYSIS_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: r-lib/actions/setup-r@v2
-      - name: Run reproducible analysis
-        run: Rscript r-analysis/run_ergm.R "${{ github.event.client_payload.run_id || inputs.run_id }}"
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::jsonlite
+            any::httr2
+            any::network
+            any::ergm
+            any::sna
+          cache-version: 1
+      - name: Validate secrets
+        shell: bash
+        run: |
+          test -n "$API_BASE_URL" || (echo "API_BASE_URL secret is missing" && exit 1)
+          test -n "$ANALYSIS_API_TOKEN" || (echo "ANALYSIS_API_TOKEN secret is missing" && exit 1)
+      - name: Run ERGM
+        run: Rscript r-analysis/run_ergm.R "$RUN_ID"
       - uses: actions/upload-artifact@v4
-        with: { name: ergm-results, path: artifacts/ }
+        if: always()
+        with:
+          name: ergm-results-${{ env.RUN_ID }}
+          path: artifacts/
+          retention-days: 30
