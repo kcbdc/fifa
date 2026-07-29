@@ -18,3 +18,12 @@ test('v7 ERGM automation files and routes',()=>{
   assert.match(r,/mcmc\.diagnostics/);
   assert.match(r,/gof\(/);
 });
+
+test('v8 validation and robust R conversion',()=>{
+  const ts=fs.readFileSync('src/index.ts','utf8'), r=fs.readFileSync('r-analysis/run_ergm.R','utf8'), js=fs.readFileSync('public/app.js','utf8');
+  assert.match(ts,/api\/model-validation/);
+  assert.match(ts,/validation_failed/);
+  assert.match(r,/records_to_df/);
+  assert.match(r,/data-validation\.json/);
+  assert.match(js,/validateModel/);
+});

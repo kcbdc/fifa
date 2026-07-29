@@ -9,6 +9,7 @@ library(jsonlite)
 library(httr2)
 library(network)
 library(ergm)
+`%||%` <- function(x, y) if (is.null(x)) y else x
 
 api_get <- function(path) {
   request(paste0(sub("/$", "", base_url), path)) |>
@@ -25,87 +26,160 @@ api_post <- function(path, body) {
     req_perform()
 }
 
-failure_callback <- function(message, diagnostics = list()) {
-  payload <- list(run_id = as.integer(run_id), status = "failed", converged = FALSE,
-                  result = list(error = message), diagnostics = diagnostics)
-  try(api_post("/api/model-results", payload), silent = TRUE)
-  write_json(payload, "artifacts/model-result.json", pretty = TRUE, auto_unbox = TRUE)
+# httr2 simplifyVector=FALSE returns a list of row objects. Convert it safely,
+# preserving missing fields as NA instead of letting as.data.frame recycle columns.
+records_to_df <- function(x) {
+  if (is.null(x) || length(x) == 0L) return(data.frame())
+  if (is.data.frame(x)) return(x)
+  if (!is.list(x)) stop("API records are not a list")
+  if (!is.null(names(x)) && all(nzchar(names(x))) && !all(vapply(x, is.list, logical(1)))) x <- list(x)
+  rows <- lapply(x, function(row) {
+    if (is.null(row)) return(list())
+    if (!is.list(row)) return(list(value = row))
+    lapply(row, function(value) {
+      if (is.null(value) || length(value) == 0L) return(NA)
+      if (length(value) == 1L && !is.list(value)) return(value)
+      toJSON(value, auto_unbox = TRUE, null = "null")
+    })
+  })
+  fields <- unique(unlist(lapply(rows, names), use.names = FALSE))
+  if (!length(fields)) return(data.frame())
+  normalized <- lapply(rows, function(row) {
+    out <- setNames(vector("list", length(fields)), fields)
+    for (field in fields) out[[field]] <- if (field %in% names(row)) row[[field]] else NA
+    as.data.frame(out, stringsAsFactors = FALSE, check.names = FALSE)
+  })
+  result <- do.call(rbind, normalized)
+  rownames(result) <- NULL
+  result
 }
 
+safe_numeric <- function(x) suppressWarnings(as.numeric(as.character(x)))
+write_validation <- function(validation) {
+  write_json(validation, "artifacts/data-validation.json", pretty = TRUE, auto_unbox = TRUE, null = "null")
+}
+failure_callback <- function(message, diagnostics = list(), validation = list()) {
+  payload <- list(run_id = as.integer(run_id), status = "failed", converged = FALSE,
+                  result = list(error = message, validation = validation), diagnostics = diagnostics)
+  try(api_post("/api/model-results", payload), silent = TRUE)
+  write_json(payload, "artifacts/model-result.json", pretty = TRUE, auto_unbox = TRUE, null = "null")
+  writeLines(c("ERGM ANALYSIS FAILED", paste0("Run ID: ", run_id), paste0("Reason: ", message)), "artifacts/model-summary.txt")
+}
+
+validation <- list()
 tryCatch({
   dat <- api_get(paste0("/api/model-input?run_id=", URLencode(run_id)))
-  teams <- as.data.frame(dat$teams, stringsAsFactors = FALSE)
-  matches <- as.data.frame(dat$matches, stringsAsFactors = FALSE)
-  rankings <- as.data.frame(dat$rankings, stringsAsFactors = FALSE)
-  run <- dat$run
-  if (nrow(teams) < 2 || nrow(matches) < 1) stop("분석 가능한 국가 또는 경기 데이터가 부족합니다.")
+  validation <- dat$validation %||% list()
+  write_validation(validation)
+  if (identical(validation$ok, FALSE)) stop(paste(c("Server preflight failed", unlist(validation$errors)), collapse = ": "))
+
+  teams <- records_to_df(dat$teams)
+  matches <- records_to_df(dat$matches)
+  rankings <- records_to_df(dat$rankings)
+  run_df <- records_to_df(dat$run)
+  if (!nrow(run_df)) stop("Model run metadata is missing")
+  run <- as.list(run_df[1, , drop = FALSE])
+
+  required_team <- c("id", "confederation")
+  required_match <- c("home_team_id", "away_team_id", "home_score", "away_score")
+  missing_team <- setdiff(required_team, names(teams))
+  missing_match <- setdiff(required_match, names(matches))
+  if (length(missing_team)) stop(paste("Missing team columns:", paste(missing_team, collapse = ", ")))
+  if (length(missing_match)) stop(paste("Missing match columns:", paste(missing_match, collapse = ", ")))
+  if (nrow(teams) < 2L) stop(sprintf("Too few teams: %d", nrow(teams)))
+  if (nrow(matches) < 1L) stop("No match records were returned")
 
   vids <- as.character(teams$id)
-  directed <- identical(run$network_type, "win")
-  edges <- list()
+  directed <- identical(as.character(run$network_type), "win")
+  edges <- vector("list", nrow(matches))
+  edge_count <- 0L
   for (i in seq_len(nrow(matches))) {
     h <- as.character(matches$home_team_id[i]); a <- as.character(matches$away_team_id[i])
-    if (!h %in% vids || !a %in% vids || h == a) next
+    if (is.na(h) || is.na(a) || !h %in% vids || !a %in% vids || h == a) next
     if (directed) {
-      hs <- as.numeric(matches$home_score[i]); as_ <- as.numeric(matches$away_score[i])
-      if (is.na(hs) || is.na(as_) || hs == as_) next
-      edges[[length(edges)+1]] <- if (hs > as_) c(h,a) else c(a,h)
-    } else edges[[length(edges)+1]] <- c(h,a)
+      hs <- safe_numeric(matches$home_score[i]); as_ <- safe_numeric(matches$away_score[i])
+      if (!is.finite(hs) || !is.finite(as_) || hs == as_) next
+      edge_count <- edge_count + 1L
+      edges[[edge_count]] <- if (hs > as_) c(h, a) else c(a, h)
+    } else {
+      edge_count <- edge_count + 1L
+      edges[[edge_count]] <- c(h, a)
+    }
   }
-  if (!length(edges)) stop("선택한 네트워크 유형에서 생성된 엣지가 없습니다.")
+  if (!edge_count) stop("No usable edges were generated for the selected network type")
+  edges <- edges[seq_len(edge_count)]
   em <- unique(do.call(rbind, edges))
+  if (is.null(dim(em))) em <- matrix(em, ncol = 2, byrow = TRUE)
   idx <- setNames(seq_along(vids), vids)
-  em_num <- cbind(unname(idx[em[,1]]), unname(idx[em[,2]]))
+  em_num <- cbind(unname(idx[em[, 1]]), unname(idx[em[, 2]]))
+  em_num <- em_num[complete.cases(em_num), , drop = FALSE]
+  if (!nrow(em_num)) stop("All generated edges referenced unknown teams")
+
   net <- network(em_num, vertex.attr = list(vertex.names = vids), directed = directed, loops = FALSE, multiple = FALSE)
-  set.vertex.attribute(net, "confederation", teams$confederation[match(network.vertex.names(net), vids)])
+  conf <- as.character(teams$confederation[match(network.vertex.names(net), vids)])
+  conf[is.na(conf) | !nzchar(conf)] <- "UNK"
+  set.vertex.attribute(net, "confederation", conf)
   latest_points <- setNames(rep(0, length(vids)), vids)
-  if (nrow(rankings)) latest_points[as.character(rankings$team_id)] <- as.numeric(rankings$points)
-  latest_points[!is.finite(latest_points)] <- 0
+  if (nrow(rankings) && all(c("team_id", "points") %in% names(rankings))) {
+    rp <- safe_numeric(rankings$points)
+    ok <- is.finite(rp) & as.character(rankings$team_id) %in% vids
+    latest_points[as.character(rankings$team_id[ok])] <- rp[ok]
+  }
   set.vertex.attribute(net, "ranking_points", unname(latest_points[network.vertex.names(net)]))
 
-  rhs <- sub("^\\s*network\\s*~", "", run$formula)
-  if (!directed) rhs <- gsub("(^|\\+)\\s*mutual\\s*(?=\\+|$)", "\\1", rhs, perl=TRUE)
+  rhs <- sub("^\\s*network\\s*~", "", as.character(run$formula))
+  if (!directed) rhs <- gsub("(^|\\+)\\s*mutual\\s*(?=\\+|$)", "\\1", rhs, perl = TRUE)
   rhs <- gsub("\\+\\s*\\+", "+", rhs)
   rhs <- gsub("^\\s*\\+|\\+\\s*$", "", rhs)
   if (!nzchar(trimws(rhs))) rhs <- "edges"
   f <- as.formula(paste("net ~", rhs))
 
-  fit <- ergm(f, control = control.ergm(MCMLE.maxit = 20, MCMC.burnin = 10000, MCMC.interval = 1000, seed = 20260728))
-  sm <- summary(fit)
-  raw_coef <- as.data.frame(sm$coefficients, check.names = FALSE)
-  coef_mat <- data.frame(
-    term = rownames(raw_coef),
-    estimate = as.numeric(raw_coef[[1]]),
-    std_error = as.numeric(raw_coef[[2]]),
-    mcmc_percent = if (ncol(raw_coef) >= 3) as.numeric(raw_coef[[3]]) else NA_real_,
-    z_value = if (ncol(raw_coef) >= 4) as.numeric(raw_coef[[4]]) else NA_real_,
-    p_value = if (ncol(raw_coef) >= 5) as.numeric(raw_coef[[5]]) else NA_real_,
-    stringsAsFactors = FALSE
-  )
+  fit <- ergm(f, control = control.ergm(MCMLE.maxit = 20, MCMC.burnin = 10000,
+                                         MCMC.interval = 1000, seed = 20260728))
+  coef_summary <- coef(summary(fit))
+  if (is.null(dim(coef_summary))) coef_summary <- matrix(coef_summary, nrow = 1)
+  col_names <- colnames(coef_summary)
+  find_col <- function(pattern, fallback = NA_integer_) {
+    hit <- grep(pattern, col_names, ignore.case = TRUE)
+    if (length(hit)) hit[[1]] else fallback
+  }
+  estimate_i <- find_col("estimate", 1L)
+  se_i <- find_col("std.*error|standard.*error", if (ncol(coef_summary) >= 2) 2L else NA_integer_)
+  z_i <- find_col("z.*value|mcmc.*%", if (ncol(coef_summary) >= 3) 3L else NA_integer_)
+  p_i <- find_col("pr\\(|p.*value", if (ncol(coef_summary) >= 4) ncol(coef_summary) else NA_integer_)
+  val <- function(i) if (is.na(i)) rep(NA_real_, nrow(coef_summary)) else safe_numeric(coef_summary[, i])
+  coef_mat <- data.frame(term = rownames(coef_summary), estimate = val(estimate_i),
+                         std_error = val(se_i), z_value = val(z_i), p_value = val(p_i),
+                         stringsAsFactors = FALSE)
   coef_mat$odds_ratio <- exp(coef_mat$estimate)
   write.csv(coef_mat, "artifacts/coefficients.csv", row.names = FALSE)
 
-  png("artifacts/mcmc-diagnostics.png", width=1400, height=900, res=150)
+  png("artifacts/mcmc-diagnostics.png", width = 1400, height = 900, res = 150)
   mcmc.diagnostics(fit)
   dev.off()
   gof_obj <- gof(fit)
-  png("artifacts/gof.png", width=1400, height=900, res=150)
+  png("artifacts/gof.png", width = 1400, height = 900, res = 150)
   plot(gof_obj)
   dev.off()
 
   converged <- all(is.finite(coef_mat$estimate))
-  result <- list(
-    run_id = as.integer(run_id), status = "completed", converged = converged,
-    formula = paste(deparse(f), collapse=""), network_type = run$network_type,
-    node_count = network.size(net), edge_count = network.edgecount(net),
-    aic = AIC(fit), bic = BIC(fit), coefficients = unname(split(coef_mat, seq_len(nrow(coef_mat))))
-  )
-  diagnostics <- list(seed=20260728, session=capture.output(sessionInfo()), gof=capture.output(print(gof_obj)))
-  write_json(list(result=result, diagnostics=diagnostics), "artifacts/model-result.json", pretty=TRUE, auto_unbox=TRUE, null="null")
-  writeLines(capture.output(summary(fit)), "artifacts/model-summary.txt")
-  api_post("/api/model-results", list(run_id=as.integer(run_id), status="completed", converged=converged,
-            aic=unname(AIC(fit)), bic=unname(BIC(fit)), result=result, diagnostics=diagnostics))
+  coefficient_rows <- lapply(seq_len(nrow(coef_mat)), function(i) as.list(coef_mat[i, , drop = FALSE]))
+  result <- list(run_id = as.integer(run_id), status = "completed", converged = converged,
+                 formula = paste(deparse(f), collapse = ""), network_type = as.character(run$network_type),
+                 node_count = network.size(net), edge_count = network.edgecount(net),
+                 input_counts = list(teams = nrow(teams), matches = nrow(matches), rankings = nrow(rankings)),
+                 aic = unname(AIC(fit)), bic = unname(BIC(fit)), coefficients = coefficient_rows,
+                 validation = validation)
+  diagnostics <- list(seed = 20260728, session = capture.output(sessionInfo()),
+                      gof = capture.output(print(gof_obj)), coefficient_columns = col_names)
+  write_json(list(result = result, diagnostics = diagnostics), "artifacts/model-result.json",
+             pretty = TRUE, auto_unbox = TRUE, null = "null")
+  writeLines(c(sprintf("Input: teams=%d matches=%d rankings=%d", nrow(teams), nrow(matches), nrow(rankings)),
+               capture.output(summary(fit))), "artifacts/model-summary.txt")
+  api_post("/api/model-results", list(run_id = as.integer(run_id), status = "completed",
+           converged = converged, aic = unname(AIC(fit)), bic = unname(BIC(fit)),
+           result = result, diagnostics = diagnostics))
 }, error = function(e) {
-  failure_callback(conditionMessage(e), list(session=capture.output(sessionInfo())))
+  failure_callback(conditionMessage(e), list(session = capture.output(sessionInfo())), validation)
   stop(e)
 })
