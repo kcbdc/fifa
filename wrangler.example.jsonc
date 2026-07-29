@@ -26,14 +26,15 @@
   },
   "vars": {
     "APP_NAME": "FIFA Network Lab",
+    "GITHUB_OWNER": "REPLACE_WITH_GITHUB_OWNER",
+    "GITHUB_REPO": "REPLACE_WITH_GITHUB_REPO",
+    "PUBLIC_BASE_URL": "https://fifa-network-lab.junewoopark16.workers.dev",
     "DATA_WINDOW_YEARS": "4",
     "BATCH_STATEMENTS": "75",
     "MATCH_CSV_URL": "https://raw.githubusercontent.com/martj42/international_results/master/results.csv",
     "WORLD_BANK_COUNTRY_URL": "https://api.worldbank.org/v2/country?format=json&per_page=400",
     "WORLD_BANK_GDP_URL": "https://api.worldbank.org/v2/country/all/indicator/NY.GDP.PCAP.CD?format=json&per_page=20000&date=2022:2026",
     "WORLD_BANK_POP_URL": "https://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL?format=json&per_page=20000&date=2022:2026",
-    "FREE_RANKING_CSV_URL": "https://raw.githubusercontent.com/Dato-Futbol/fifa-ranking/refs/heads/master/ranking_fifa_historical.csv",
-    "GITHUB_OWNER": "",
-    "GITHUB_REPO": ""
+    "FREE_RANKING_CSV_URL": "https://raw.githubusercontent.com/Dato-Futbol/fifa-ranking/refs/heads/master/ranking_fifa_historical.csv"
   }
 }
