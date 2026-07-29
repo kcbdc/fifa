@@ -51,8 +51,23 @@ test('v10 immediate dashboard health and fixed GitHub target',()=>{
   assert.match(app,/Promise\.allSettled/);
   assert.match(app,/autoSourceCheck\(\)/);
   assert.match(worker,/async function systemHealth/);
-  assert.match(worker,/VERSION='10\.0\.0'/);
+  assert.match(worker,/VERSION='11\.0\.0'/);
   assert.match(wrangler,/"GITHUB_OWNER": "kcbdc"/);
   assert.match(wrangler,/"GITHUB_REPO": "fifa"/);
   assert.doesNotMatch(wrangler,/REPLACE_WITH_GITHUB_OWNER|REPLACE_WITH_GITHUB_REPO/);
+});
+
+
+test('v11 FIFA 211 normalization',()=>{
+ const ts=fs.readFileSync('src/index.ts','utf8');
+ const master=fs.readFileSync('src/fifa-master.ts','utf8');
+ const migration=fs.readFileSync('migrations/0005_fifa_211_normalization.sql','utf8');
+ const html=fs.readFileSync('public/index.html','utf8');
+ assert.match(ts,/api\/fifa-normalize/);
+ assert.match(ts,/is_fifa_member=1/);
+ assert.match(ts,/unmapped_team_names/);
+ assert.match(master,/FIFA_MEMBERS/);
+ assert.equal((master.match(/"code":/g)||[]).length,211);
+ assert.match(migration,/CREATE TABLE IF NOT EXISTS fifa_members/);
+ assert.match(html,/FIFA 211 정규화/);
 });

@@ -11,7 +11,7 @@ async function init(){
   await loadHealth().catch(()=>null);
   const results=await Promise.allSettled([api('/api/dashboard'),api('/api/quality'),api('/api/rankings'),loadProvider(),api('/api/network')]);
   const [dr,qr,rr,pr,nr]=results;
-  if(dr.status==='fulfilled'){const d=dr.value;$('#cards').innerHTML=card('국가',d.teams)+card('경기',d.matches)+card('랭킹 기록',d.rankings)+card('미해결 이슈',d.issues)+card('모형 실행',d.runs.length);renderProgress(d.progress)}
+  if(dr.status==='fulfilled'){const d=dr.value;$('#cards').innerHTML=card('FIFA 회원국',d.teams)+card('원시 팀',d.rawTeams)+card('제외 팀',d.excludedTeams)+card('미매핑 이름',d.unmappedNames)+card('경기',d.matches)+card('랭킹 기록',d.rankings)+card('미해결 이슈',d.issues)+card('모형 실행',d.runs.length);renderProgress(d.progress);if(d.teams===211)setHealth('good','정상',`FIFA 211개 회원국 정규화 · DB 연결`)}
   else $('#cards').innerHTML=card('상태','데이터 요약 로딩 실패');
   if(qr.status==='fulfilled')renderQuality(qr.value);else $('#quality').textContent='품질정보를 불러오지 못했습니다.';
   if(rr.status==='fulfilled'){$('#rankingList').innerHTML=rr.value.slice(0,8).map(x=>`<div><b>${x.rank}</b> ${x.name_ko||x.name_en||x.fifa_code} <span class="pill">${Number(x.points||0).toFixed(1)}</span></div>`).join('')||'데이터 없음'}
@@ -19,9 +19,11 @@ async function init(){
   if(nr.status==='fulfilled')draw(nr.value,'networkCanvas');else draw({nodes:[],links:[]},'networkCanvas');
   autoSourceCheck();
 }
-function renderQuality(q){$('#quality').innerHTML=`<div class="metric"><b class="${q.score>=90?'good':'warn'}">${q.score}점</b><span>중복 ${q.duplicates.length} · 오류 ${q.invalid.length}</span></div>`}
+function renderQuality(q){$('#quality').innerHTML=`<div class="metric"><b class="${q.score>=90?'good':'warn'}">${q.score}점</b><span>중복 ${q.duplicates.length} · 오류 ${q.invalid.length} · 비회원 경기 제외 ${q.excludedNonMemberMatches||0}</span></div>`}
 function draw(data,id){const c=document.getElementById(id);if(!c)return data;const x=c.getContext('2d'),w=c.width,h=c.height;x.clearRect(0,0,w,h);if(!data?.nodes?.length){x.fillStyle='#9fb2c9';x.font='16px sans-serif';x.textAlign='center';x.fillText('수집된 네트워크 데이터가 없습니다.',w/2,h/2);x.textAlign='start';return data}const nodes=data.nodes.map((n,i)=>({...n,x:w/2+Math.cos(i*6.28/data.nodes.length)*Math.min(w,h)*.36,y:h/2+Math.sin(i*6.28/data.nodes.length)*Math.min(w,h)*.36}));const map=Object.fromEntries(nodes.map(n=>[n.id,n]));x.strokeStyle='#42658a';for(const l of data.links){const a=map[l.source],b=map[l.target];if(!a||!b)continue;x.lineWidth=Math.min(7,1+l.value);x.beginPath();x.moveTo(a.x,a.y);x.lineTo(b.x,b.y);x.stroke()}for(const n of nodes){x.fillStyle='#55a8ff';x.beginPath();x.arc(n.x,n.y,8,0,Math.PI*2);x.fill();x.fillStyle='#eaf1ff';x.font='13px sans-serif';x.fillText(n.label,n.x+11,n.y+4)}return data}
 $('#drawBtn').onclick=async()=>{const d=await api(`/api/network?from=${$('#from').value}&to=${$('#to').value}&type=${$('#networkType').value}`);draw(d,'networkCanvas2');$('#netStats').textContent=`노드 ${d.nodes.length} · 엣지 ${d.links.length} · 원자료 경기 ${d.meta.matches}`};
+
+$('#normalizeBtn').onclick=async()=>{try{$('#log').textContent='FIFA 211개 회원국 기준으로 기존 팀·경기·랭킹을 정규화 중...';const d=await api('/api/fifa-normalize',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});$('#log').textContent=JSON.stringify(d,null,2);await init()}catch(e){$('#log').textContent=e.message}};
 $('#qualityBtn').onclick=async()=>{const q=await api('/api/quality');renderQuality(q);$('#log').textContent=JSON.stringify(q,null,2)};
 $('#providerTestBtn').onclick=async()=>{try{$('#log').textContent='API 연결 진단 중...';const d=await api('/api/provider/test');$('#log').textContent=JSON.stringify(d,null,2);const ok=(d.results||[]).filter(x=>x.ok).length,total=(d.results||[]).length;setHealth(d.ok?'good':'warn',d.ok?'정상':'부분 정상',`외부 데이터 소스 ${ok}/${total} 연결`)}catch(e){$('#log').textContent=e.message}};
 function renderProgress(p){if(!p)return;$('#progressBar').style.width=`${p.percent}%`;$('#progressText').textContent=`${p.completed} / ${p.total} (${p.percent}%)`;$('#nextTask').textContent=p.finished?'수집 완료':`다음 작업: ${p.next?.label||'-'} · 남은 배치 ${p.remaining}개`;}
