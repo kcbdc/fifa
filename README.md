@@ -26,3 +26,15 @@ npm run dev
 ## v2 자동수집 어댑터
 
 `PROVIDER_SETUP_KO.md`를 참고하십시오. Sportradar FIFA Rankings와 Daily Summaries JSON 매핑, 국가대표 코드 필터, 최근 4년 분할 백필 커서가 포함되어 있습니다.
+
+## v8 변경사항
+- ERGM 입력 JSON 안전 변환
+- 실행 전 데이터 검증
+- 오류 산출물 자동 생성
+
+## v10
+첫 화면 자동 상태진단과 GitHub 설정 고정 기능이 추가되었습니다. 자세한 내용은 V10_AUTO_STATUS_KO.md를 참고하십시오.
+
+
+## v13 논문 경쟁력 기능
+연구 프로젝트, 데이터셋 동결, 연도별 네트워크, GraphML/GEXF, 인용정보, 재현성 보고서를 제공합니다.
