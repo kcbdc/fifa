@@ -1,0 +1,17 @@
+name: ERGM Analysis
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: 'Model run ID', required: false, default: 'manual' }
+  repository_dispatch:
+    types: [run-ergm]
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+      - name: Run reproducible analysis
+        run: Rscript r-analysis/run_ergm.R "${{ github.event.client_payload.run_id || inputs.run_id }}"
+      - uses: actions/upload-artifact@v4
+        with: { name: ergm-results, path: artifacts/ }
