@@ -14,7 +14,7 @@ async function init(){
   if(dr.status==='fulfilled'){const d=dr.value;$('#cards').innerHTML=card('FIFA 회원국',d.teams)+card('원시 팀',d.rawTeams)+card('제외 팀',d.excludedTeams)+card('미매핑 이름',d.unmappedNames)+card('경기',d.matches)+card('랭킹 기록',d.rankings)+card('미해결 이슈',d.issues)+card('모형 실행',d.runs.length);renderProgress(d.progress);if(d.teams===211)setHealth('good','정상',`FIFA 211개 회원국 정규화 · DB 연결`)}
   else $('#cards').innerHTML=card('상태','데이터 요약 로딩 실패');
   if(qr.status==='fulfilled')renderQuality(qr.value);else $('#quality').textContent='품질정보를 불러오지 못했습니다.';
-  if(rr.status==='fulfilled'){$('#rankingList').innerHTML=rr.value.slice(0,8).map(x=>`<div><b>${x.rank}</b> ${x.name_ko||x.name_en||x.fifa_code} <span class="pill">${Number(x.points||0).toFixed(1)}</span></div>`).join('')||'데이터 없음'}
+  if(rr.status==='fulfilled'){const rows=Array.isArray(rr.value)?rr.value:[];const snapshot=rows[0];$('#rankingList').innerHTML=(snapshot?`<small class="muted">발표일 ${snapshot.release_date} · ${snapshot.snapshot_coverage||rows.length}개국 기준</small>`:'')+rows.slice(0,8).map(x=>`<div><b>${x.rank}</b> ${x.name_ko||x.name_en||x.fifa_code} <span class="pill">${Number(x.points||0).toFixed(1)}</span></div>`).join('')||'데이터 없음'}
   else $('#rankingList').textContent='랭킹 정보를 불러오지 못했습니다.';
   if(nr.status==='fulfilled')draw(nr.value,'networkCanvas');else draw({nodes:[],links:[]},'networkCanvas');
   autoSourceCheck();
@@ -46,6 +46,31 @@ $('#checkModel').onclick=async()=>{const id=$('#runLookup').value;if(!id)return 
 
 let githubDiagLoaded=false;
 async function autoGithubDiagnostic(){if(githubDiagLoaded)return;githubDiagLoaded=true;try{$('#githubDiagResult').textContent='GitHub 연결을 자동 확인 중입니다...';const d=await api('/api/github/diagnostics');renderGithubDiag(d);$('#modelDetail').textContent=JSON.stringify(d,null,2)}catch(e){githubDiagLoaded=false;$('#githubDiagResult').innerHTML=`<b class="bad">자동 진단 실패</b><p>${e.message}</p>`}}
+
+function graphColor(group){return ({AFC:'#54c6ff',CAF:'#ffbd59',CONCACAF:'#ff7f8f',CONMEBOL:'#71e6a8',OFC:'#bf8cff',UEFA:'#7aa7ff'}[group]||'#9fb5cc')}
+function draw(data,canvasId){
+  const canvas=document.getElementById(canvasId);if(!canvas)return;
+  const ctx=canvas.getContext('2d'),cssW=Math.max(320,canvas.clientWidth||canvas.width||900),cssH=Math.max(300,Number(canvas.getAttribute('height'))||440),dpr=Math.min(2,window.devicePixelRatio||1);
+  canvas.width=Math.round(cssW*dpr);canvas.height=Math.round(cssH*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,cssW,cssH);ctx.fillStyle='#091727';ctx.fillRect(0,0,cssW,cssH);
+  const nodes=Array.isArray(data?.nodes)?data.nodes:[],links=Array.isArray(data?.links)?data.links:[];
+  if(!nodes.length){ctx.fillStyle='#91a7be';ctx.font='16px sans-serif';ctx.textAlign='center';ctx.fillText('표시할 네트워크 데이터가 없습니다.',cssW/2,cssH/2);return}
+  const degree=new Map(nodes.map(n=>[n.id,0]));for(const l of links){degree.set(l.source,(degree.get(l.source)||0)+Number(l.value||1));degree.set(l.target,(degree.get(l.target)||0)+Number(l.value||1))}
+  const groups=[...new Set(nodes.map(n=>n.group||'UNK'))].sort(),byGroup=new Map(groups.map(g=>[g,nodes.filter(n=>(n.group||'UNK')===g)]));
+  const pos=new Map(),cx=cssW/2,cy=cssH/2,R=Math.max(90,Math.min(cssW,cssH)*.39);
+  groups.forEach((g,gi)=>{const arr=byGroup.get(g)||[],base=2*Math.PI*gi/groups.length-Math.PI/2,spread=Math.min(1.15,Math.PI*2/groups.length*.8);arr.forEach((n,i)=>{const off=arr.length===1?0:(i/(arr.length-1)-.5)*spread,rank=(i%3),r=R-rank*22;pos.set(n.id,{x:cx+Math.cos(base+off)*r,y:cy+Math.sin(base+off)*r})})});
+  ctx.globalAlpha=.16;ctx.lineWidth=.7;ctx.strokeStyle='#74a9d8';for(const l of links){const a=pos.get(l.source),b=pos.get(l.target);if(!a||!b)continue;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke()}ctx.globalAlpha=1;
+  const top=new Set([...nodes].sort((a,b)=>(degree.get(b.id)||0)-(degree.get(a.id)||0)).slice(0,12).map(n=>n.id));
+  for(const n of nodes){const p=pos.get(n.id),d=degree.get(n.id)||0,r=n.isolate?2.2:Math.min(7,2.7+Math.sqrt(d)*.18);ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fillStyle=n.isolate?'#53677d':graphColor(n.group);ctx.fill();if(top.has(n.id)){ctx.font='10px sans-serif';ctx.fillStyle='#eaf2ff';ctx.textAlign='left';ctx.fillText(n.id,p.x+r+2,p.y+3)}}
+  ctx.fillStyle='#91a7be';ctx.font='12px sans-serif';ctx.textAlign='left';ctx.fillText(`노드 ${nodes.length} · 엣지 ${links.length} · 고립 노드 ${data?.meta?.isolateCount??nodes.filter(n=>n.isolate).length}`,12,20);
+}
+async function drawExplorer(){
+  const from=$('#from').value,to=$('#to').value,type=$('#networkType').value;const btn=$('#drawBtn');btn.disabled=true;btn.textContent='생성 중...';
+  try{const d=await api(`/api/network?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&type=${encodeURIComponent(type)}`);draw(d,'networkCanvas2');$('#netStats').innerHTML=`노드 <b>${d.nodes.length}</b> · 엣지 <b>${d.links.length}</b> · 원자료 경기 <b>${d.meta.matches}</b> · 고립 노드 <b>${d.meta.isolateCount||0}</b>`}catch(e){$('#netStats').textContent=e.message}finally{btn.disabled=false;btn.textContent='그래프 생성'}
+}
+$('#drawBtn').onclick=drawExplorer;
+window.addEventListener('resize',()=>{clearTimeout(window.__graphResize);window.__graphResize=setTimeout(()=>{init();if($('#network').classList.contains('active'))drawExplorer()},180)});
+
 document.addEventListener('DOMContentLoaded',()=>{init();setTimeout(autoGithubDiagnostic,300)});
 
 async function loadAnalytics(){try{const d=await api(`/api/analytics?type=${$('#analyticsType')?.value||'win'}`);renderAnalytics(d)}catch(e){if($('#modelComparison'))$('#modelComparison').textContent=e.message}}

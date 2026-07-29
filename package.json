@@ -1,6 +1,6 @@
 {
   "name": "fifa-network-lab",
-  "version": "15.0.0",
+  "version": "17.0.0",
   "private": true,
   "type": "module",
   "scripts": {
