@@ -51,7 +51,7 @@ test('v10 immediate dashboard health and fixed GitHub target',()=>{
   assert.match(app,/Promise\.allSettled/);
   assert.match(app,/autoSourceCheck\(\)/);
   assert.match(worker,/async function systemHealth/);
-  assert.match(worker,/VERSION='11\.0\.0'/);
+  assert.match(worker,/VERSION='12\.0\.0'/);
   assert.match(wrangler,/"GITHUB_OWNER": "kcbdc"/);
   assert.match(wrangler,/"GITHUB_REPO": "fifa"/);
   assert.doesNotMatch(wrangler,/REPLACE_WITH_GITHUB_OWNER|REPLACE_WITH_GITHUB_REPO/);
@@ -71,3 +71,6 @@ test('v11 FIFA 211 normalization',()=>{
  assert.match(migration,/CREATE TABLE IF NOT EXISTS fifa_members/);
  assert.match(html,/FIFA 211 정규화/);
 });
+
+
+test('v12 advanced research analytics',()=>{const ts=fs.readFileSync('src/index.ts','utf8'),h=fs.readFileSync('public/index.html','utf8'),a=fs.readFileSync('public/app.js','utf8');for(const x of ['/api/analytics','/api/model-comparison','/api/reproducibility','/api/interpret'])assert.ok(ts.includes(x),x);assert.match(ts,/VERSION='12\.0\.0'/);assert.match(h,/고급 네트워크 분석/);assert.match(a,/loadAnalytics/);assert.match(a,/reproExport/)});
