@@ -26,8 +26,8 @@
   },
   "vars": {
     "APP_NAME": "FIFA Network Lab",
-    "GITHUB_OWNER": "REPLACE_WITH_GITHUB_OWNER",
-    "GITHUB_REPO": "REPLACE_WITH_GITHUB_REPO",
+    "GITHUB_OWNER": "kcbdc",
+    "GITHUB_REPO": "fifa",
     "GITHUB_WORKFLOW_FILE": "analyze.yml",
     "GITHUB_DISPATCH_MODE": "auto",
     "PUBLIC_BASE_URL": "https://fifa-network-lab.junewoopark16.workers.dev",

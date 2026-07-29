@@ -42,3 +42,17 @@ test('v9 GitHub diagnostics and ERGM fallback',()=>{
  assert.match(r,/candidate_rhs/);
  assert.match(r,/fallback_used/);
 });
+
+test('v10 immediate dashboard health and fixed GitHub target',()=>{
+  const app=fs.readFileSync('public/app.js','utf8');
+  const worker=fs.readFileSync('src/index.ts','utf8');
+  const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
+  assert.match(app,/async function loadHealth/);
+  assert.match(app,/Promise\.allSettled/);
+  assert.match(app,/autoSourceCheck\(\)/);
+  assert.match(worker,/async function systemHealth/);
+  assert.match(worker,/VERSION='10\.0\.0'/);
+  assert.match(wrangler,/"GITHUB_OWNER": "kcbdc"/);
+  assert.match(wrangler,/"GITHUB_REPO": "fifa"/);
+  assert.doesNotMatch(wrangler,/REPLACE_WITH_GITHUB_OWNER|REPLACE_WITH_GITHUB_REPO/);
+});
