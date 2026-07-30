@@ -1,6 +1,6 @@
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 async function api(path,opt){const r=await fetch(path,opt);let d;try{d=await r.json()}catch{d={error:await r.text()}}if(!r.ok)throw new Error(d.error||'요청 실패');return d}
-function show(view){$$('.view').forEach(x=>x.classList.toggle('active',x.id===view));window.scrollTo(0,0);if(view==='home')init();if(view==='model')autoGithubDiagnostic();if(view==='analytics')loadAnalytics()}
+function show(view){$$('.view').forEach(x=>x.classList.toggle('active',x.id===view));window.scrollTo(0,0);if(view==='home')init();if(view==='model')autoGithubDiagnostic();else if(typeof stopGithubPoll==='function')stopGithubPoll();if(view==='analytics')loadAnalytics()}
 $$('nav button').forEach(b=>b.onclick=()=>show(b.dataset.view));
 function card(k,v){return `<div class="metric"><span>${k}</span><b>${v??'-'}</b></div>`}
 function setHealth(kind,text,detail=''){const el=$('#health');if(!el)return;const cls=kind==='good'?'good':kind==='warn'?'warn':'bad';el.innerHTML=`<span class="${cls}">● ${text}</span>${detail?`<small>${detail}</small>`:''}`}
@@ -107,8 +107,34 @@ function renderGithubDiag(d){const checks=(d.checks||[]).map(x=>`<li><b>${x.name
 $('#githubDiagBtn').onclick=async()=>{try{$('#githubDiagResult').textContent='GitHub 저장소·워크플로·토큰 접근권한을 확인 중입니다...';const d=await api('/api/github/diagnostics');renderGithubDiag(d);$('#modelDetail').textContent=JSON.stringify(d,null,2)}catch(e){$('#githubDiagResult').innerHTML=`<b class="bad">진단 실패</b><p>${e.message}</p>`}};
 function renderValidation(v){if(!v)return;const counts=v.counts||{};const errors=(v.errors||[]).map(x=>`<li>${x}</li>`).join('');const warnings=(v.warnings||[]).map(x=>`<li>${x}</li>`).join('');$('#validationResult').innerHTML=`<b class="${v.ok?'good':'bad'}">${v.ok?'분석 가능':'분석 불가'}</b><p>국가 ${counts.teams||0} · 경기 ${counts.matches||0} · 사용 가능 엣지 ${counts.usableEdges||0} · 랭킹 ${counts.rankings||0}</p>${errors?`<h4>오류</h4><ul>${errors}</ul>`:''}${warnings?`<h4>주의</h4><ul>${warnings}</ul>`:''}<small>${v.recommendation||''}</small>`}
 $('#validateModel').onclick=async()=>{try{const v=await api(`/api/model-validation?type=${$('#modelNetwork').value}`);renderValidation(v);$('#modelDetail').textContent=JSON.stringify(v,null,2)}catch(e){$('#modelDetail').textContent=e.message}};
-$('#runModel').onclick=async()=>{try{const d=await api('/api/models',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#modelName').value,networkType:$('#modelNetwork').value,formula:formula()})});$('#runLookup').value=d.runId;$('#modelResult').innerHTML=`실행번호 <b>#${d.runId}</b> · ${d.status}<br>${d.note}`;renderValidation(d.validation);$('#modelDetail').textContent=JSON.stringify(d,null,2);init()}catch(e){$('#modelDetail').textContent=e.message}};
-$('#checkModel').onclick=async()=>{const id=$('#runLookup').value;if(!id)return alert('실행번호를 입력하세요');try{const d=await api(`/api/models?id=${id}`);$('#modelResult').innerHTML=`실행번호 <b>#${d.id}</b> · ${d.status}`;$('#modelDetail').textContent=JSON.stringify(d,null,2)}catch(e){$('#modelDetail').textContent=e.message}};
+const STEP_ICON={completed_success:'✅',completed_failure:'❌',completed_cancelled:'⏹️',in_progress:'🔄',queued:'⏳',pending:'⏳'};
+function stepIcon(s){if(s.status==='completed')return s.conclusion==='success'?STEP_ICON.completed_success:s.conclusion==='cancelled'?STEP_ICON.completed_cancelled:STEP_ICON.completed_failure;if(s.status==='in_progress')return STEP_ICON.in_progress;return STEP_ICON.pending}
+function renderGithubStepProgress(d){
+  const box=$('#githubStepProgress');if(!box)return;
+  if(!d||!d.ok){box.style.display='block';box.innerHTML=`<b>GitHub 진행 상황</b><p class="warn">${d?.error||'조회할 수 없습니다.'}</p>`;return}
+  if(!d.steps||!d.steps.length){box.style.display='block';box.innerHTML=`<b>GitHub 진행 상황</b><p>${d.note||'대기 중입니다...'}</p>`;return}
+  box.style.display='block';
+  const rows=d.steps.map(s=>`<li>${stepIcon(s)} ${s.label}</li>`).join('');
+  box.innerHTML=`<b>GitHub 진행 상황</b>${d.runUrl?` · <a href="${d.runUrl}" target="_blank" rel="noopener">Actions에서 보기</a>`:''}<ul class="step-list">${rows}</ul>`;
+}
+let githubPollTimer=null;
+function stopGithubPoll(){if(githubPollTimer){clearInterval(githubPollTimer);githubPollTimer=null}}
+function startGithubPoll(runId){
+  stopGithubPoll();
+  const tick=async()=>{
+    try{
+      const d=await api(`/api/github/run-progress?id=${runId}`);
+      renderGithubStepProgress(d);
+      const jobDone=d.jobStatus==='completed';
+      const modelDone=d.phase==='completed'||d.phase==='failed';
+      if(jobDone&&modelDone)stopGithubPoll();
+    }catch(e){/* 일시적 오류는 조용히 무시하고 다음 폴링에서 재시도 */}
+  };
+  tick();
+  githubPollTimer=setInterval(tick,8000);
+}
+$('#runModel').onclick=async()=>{try{const d=await api('/api/models',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#modelName').value,networkType:$('#modelNetwork').value,formula:formula()})});$('#runLookup').value=d.runId;$('#modelResult').innerHTML=`실행번호 <b>#${d.runId}</b> · ${d.status}<br>${d.note}`;renderValidation(d.validation);$('#modelDetail').textContent=JSON.stringify(d,null,2);if(d.runId)startGithubPoll(d.runId);init()}catch(e){$('#modelDetail').textContent=e.message}};
+$('#checkModel').onclick=async()=>{const id=$('#runLookup').value;if(!id)return alert('실행번호를 입력하세요');try{const d=await api(`/api/models?id=${id}`);$('#modelResult').innerHTML=`실행번호 <b>#${d.id}</b> · ${d.status}`;$('#modelDetail').textContent=JSON.stringify(d,null,2);if(d.status==='completed'||d.status==='failed'){stopGithubPoll();const p=await api(`/api/github/run-progress?id=${id}`);renderGithubStepProgress(p)}else{startGithubPoll(id)}}catch(e){$('#modelDetail').textContent=e.message}};
 
 let githubDiagLoaded=false;
 async function autoGithubDiagnostic(){if(githubDiagLoaded)return;githubDiagLoaded=true;try{$('#githubDiagResult').textContent='GitHub 연결을 자동 확인 중입니다...';const d=await api('/api/github/diagnostics');renderGithubDiag(d);$('#modelDetail').textContent=JSON.stringify(d,null,2)}catch(e){githubDiagLoaded=false;$('#githubDiagResult').innerHTML=`<b class="bad">자동 진단 실패</b><p>${e.message}</p>`}}
