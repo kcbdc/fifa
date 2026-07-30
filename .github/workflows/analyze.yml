@@ -32,6 +32,15 @@ jobs:
       API_BASE_URL: ${{ secrets.API_BASE_URL }}
       ANALYSIS_API_TOKEN: ${{ secrets.ANALYSIS_API_TOKEN }}
     steps:
+      - name: Report GitHub run ID to API
+        shell: bash
+        run: |
+          curl -sf -X POST "$API_BASE_URL/api/model-github-run" \
+            -H "Authorization: Bearer $ANALYSIS_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"run_id\":\"$RUN_ID\",\"github_run_id\":\"${{ github.run_id }}\",\"github_run_url\":\"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            || echo "::warning::GitHub run ID를 API에 보고하지 못했습니다(계속 진행)."
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
