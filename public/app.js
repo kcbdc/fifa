@@ -29,7 +29,16 @@ $('#qualityBtn').onclick=async()=>{const q=await api('/api/quality');renderQuali
 $('#providerTestBtn').onclick=async()=>{try{$('#log').textContent='API 연결 진단 중...';const d=await api('/api/provider/test');$('#log').textContent=JSON.stringify(d,null,2);const ok=(d.results||[]).filter(x=>x.ok).length,total=(d.results||[]).length;setHealth(d.ok?'good':'warn',d.ok?'정상':'부분 정상',`외부 데이터 소스 ${ok}/${total} 연결`)}catch(e){$('#log').textContent=e.message}};
 function renderProgress(p){if(!p)return;$('#progressBar').style.width=`${p.percent}%`;$('#progressText').textContent=`${p.completed} / ${p.total} (${p.percent}%)`;$('#nextTask').textContent=p.finished?'수집 완료':`다음 작업: ${p.next?.label||'-'} · 남은 배치 ${p.remaining}개`;}
 $('#collectBtn').onclick=async()=>{try{$('#log').textContent='다음 배치 수집 중...';const d=await api('/api/collect',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});$('#log').textContent=JSON.stringify(d,null,2);renderProgress(d.progress);await init()}catch(e){$('#log').textContent=e.message}};$('#resetCollectBtn').onclick=async()=>{if(!confirm('진행 커서를 처음으로 되돌릴까요? 이미 저장된 데이터는 삭제되지 않습니다.'))return;try{const d=await api('/api/collect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({reset:true})});$('#log').textContent=JSON.stringify(d,null,2);renderProgress(d.progress)}catch(e){$('#log').textContent=e.message}};
-function download(name,obj){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(obj,null,2)],{type:'application/json'}));a.download=name;a.click();URL.revokeObjectURL(a.href)}
+function triggerBlobDownload(blob,name){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+function download(name,obj){triggerBlobDownload(new Blob([JSON.stringify(obj,null,2)],{type:'application/json'}),name)}
 $('#exportBtn').onclick=$('#paperExport').onclick=async()=>download('fifa-network-research-data.json',await api('/api/export'));
 $('#reproExport').onclick=async()=>download('fifa-network-reproducibility-v13.json',await api('/api/reproducibility'));
 $('#interpretLatest').onclick=async()=>{
@@ -38,8 +47,9 @@ $('#interpretLatest').onclick=async()=>{
   try{
     const d=await api('/api/interpret');
     const badge=d.aiGenerated?`<span class="good">● AI 생성(${d.aiModel||'Workers AI'})</span>`:`<span class="warn">● 기본 요약(AI 미사용${d.aiError?': '+d.aiError:''})</span>`;
+    const runNote=d.runId?`<div style="margin-bottom:4px;color:#91a7be;font-size:12px">완료된 실행번호 #${d.runId} 기준</div>`:'';
     const notes=(d.coefficientNotes||[]).map((x)=>`<li>${x}</li>`).join('');
-    $('#paperInsight').innerHTML=`<div style="margin-bottom:8px">${badge}</div><b>${d.headline||''}</b><p>${d.summary||''}</p>${notes?`<h4>계수 해석</h4><ul>${notes}</ul>`:''}<h4>주의사항</h4><ul>${(d.cautions||[]).map(x=>`<li>${x}</li>`).join('')}</ul>`;
+    $('#paperInsight').innerHTML=`${runNote}<div style="margin-bottom:8px">${badge}</div><b>${d.headline||''}</b><p>${d.summary||''}</p>${notes?`<h4>계수 해석</h4><ul>${notes}</ul>`:''}<h4>주의사항</h4><ul>${(d.cautions||[]).map(x=>`<li>${x}</li>`).join('')}</ul>`;
   }catch(e){$('#paperInsight').textContent=e.message}
   finally{btn.disabled=false;btn.textContent=orig}
 };
@@ -171,7 +181,17 @@ $('#analyticsBtn').onclick=loadAnalytics;
 $('#comparisonBtn').onclick=async()=>{try{const d=await api('/api/model-comparison');const best=d.best?`<p class="good"><b>최적 AIC 모형 #${d.best.id}</b> · AIC ${d.best.aic} · ${d.best.usedFormula}</p>`:'<p>완료된 비교 가능 모형이 없습니다.</p>';$('#modelComparison').innerHTML=best+`<div class="table-wrap"><table><thead><tr><th>ID</th><th>모형</th><th>상태</th><th>AIC</th><th>BIC</th><th>수렴</th><th>실제 식</th></tr></thead><tbody>${(d.rows||[]).map(x=>`<tr><td>#${x.id}</td><td>${x.name}</td><td>${x.status}</td><td>${x.aic??'-'}</td><td>${x.bic??'-'}</td><td>${x.converged?'예':'아니오'}</td><td><code>${x.usedFormula||x.formula}</code></td></tr>`).join('')}</tbody></table></div>`}catch(e){$('#modelComparison').textContent=e.message}};
 
 
-function downloadUrl(url,name){const a=document.createElement('a');a.href=url;a.download=name;a.click()}
+async function downloadUrl(url,name){
+  try{
+    const res=await fetch(url);
+    if(!res.ok){
+      let msg=`다운로드 실패(HTTP ${res.status})`;
+      try{const t=await res.clone().json();if(t.error)msg=t.error}catch{}
+      throw new Error(msg)
+    }
+    triggerBlobDownload(await res.blob(),name)
+  }catch(e){alert(`파일을 받아오지 못했습니다: ${e.message}`)}
+}
 async function loadProjects(){try{const rows=await api('/api/projects');$('#projectList').innerHTML=rows.length?rows.map(x=>`<div class="rank-row"><b>#${x.id} ${x.project_name}</b><span>${x.network_type} · 스냅샷 ${x.snapshot_count} · 모형 ${x.model_count}</span></div>`).join(''):'프로젝트가 없습니다.';return rows}catch(e){$('#projectList').textContent=e.message;return[]}}
 $('#createProjectBtn').onclick=async()=>{try{const d=await api('/api/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#projectName').value,researchQuestion:$('#projectQuestion').value,networkType:'win'})});$('#researchLog').textContent=JSON.stringify(d,null,2);await loadProjects()}catch(e){$('#researchLog').textContent=e.message}};
 $('#temporalBtn').onclick=async()=>{try{const d=await api(`/api/temporal-network?type=${$('#temporalType').value}`);$('#temporalResult').innerHTML=`<div class="table-wrap"><table><thead><tr><th>연도</th><th>노드</th><th>엣지</th><th>경기</th><th>밀도</th><th>평균차수</th></tr></thead><tbody>${d.series.map(x=>`<tr><td>${x.year}</td><td>${x.nodeCount}</td><td>${x.edgeCount}</td><td>${x.matchCount}</td><td>${x.density}</td><td>${x.averageDegree}</td></tr>`).join('')}</tbody></table></div><small>${d.note}</small>`;$('#researchLog').textContent=JSON.stringify(d,null,2)}catch(e){$('#researchLog').textContent=e.message}};
