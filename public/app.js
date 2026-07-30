@@ -1,21 +1,6 @@
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
-function adminToken(){return localStorage.getItem('fnl_admin_token')||''}
-function saveAdminToken(v){if(v)localStorage.setItem('fnl_admin_token',v);else localStorage.removeItem('fnl_admin_token')}
-async function api(path,opt={}){
-  const t=adminToken(),headers={...(opt.headers||{})};
-  if(t&&!headers.authorization&&!headers.Authorization)headers.authorization=`Bearer ${t}`;
-  const r=await fetch(path,{...opt,headers});
-  let d;try{d=await r.json()}catch{d={error:await r.text()}}
-  if(!r.ok)throw new Error(d.error||(r.status===401?'인증 실패: 우측 상단에서 관리자 토큰을 저장하세요.':'요청 실패'));
-  return d
-}
+async function api(path,opt){const r=await fetch(path,opt);let d;try{d=await r.json()}catch{d={error:await r.text()}}if(!r.ok)throw new Error(d.error||'요청 실패');return d}
 function show(view){$$('.view').forEach(x=>x.classList.toggle('active',x.id===view));window.scrollTo(0,0);if(view==='home')init();if(view==='model')autoGithubDiagnostic();if(view==='analytics')loadAnalytics()}
-function refreshAdminTokenStatus(){const t=adminToken();$('#adminTokenStatus').textContent=t?'저장됨':'미설정(관리자 기능 사용 불가)';$('#adminTokenStatus').className=t?'good':'warn'}
-if($('#adminTokenInput')){
-  $('#adminTokenInput').value=adminToken();
-  refreshAdminTokenStatus();
-  $('#adminTokenSaveBtn').onclick=()=>{saveAdminToken($('#adminTokenInput').value.trim());refreshAdminTokenStatus()};
-}
 $$('nav button').forEach(b=>b.onclick=()=>show(b.dataset.view));
 function card(k,v){return `<div class="metric"><span>${k}</span><b>${v??'-'}</b></div>`}
 function setHealth(kind,text,detail=''){const el=$('#health');if(!el)return;const cls=kind==='good'?'good':kind==='warn'?'warn':'bad';el.innerHTML=`<span class="${cls}">● ${text}</span>${detail?`<small>${detail}</small>`:''}`}
@@ -47,10 +32,42 @@ $('#collectBtn').onclick=async()=>{try{$('#log').textContent='다음 배치 수�
 function download(name,obj){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(obj,null,2)],{type:'application/json'}));a.download=name;a.click();URL.revokeObjectURL(a.href)}
 $('#exportBtn').onclick=$('#paperExport').onclick=async()=>download('fifa-network-research-data.json',await api('/api/export'));
 $('#reproExport').onclick=async()=>download('fifa-network-reproducibility-v13.json',await api('/api/reproducibility'));
-$('#interpretLatest').onclick=async()=>{try{const d=await api('/api/interpret');$('#paperInsight').innerHTML=`<b>${d.headline}</b><p>${d.summary}</p><ul>${(d.cautions||[]).map(x=>`<li>${x}</li>`).join('')}</ul>`}catch(e){$('#paperInsight').textContent=e.message}};
+$('#interpretLatest').onclick=async()=>{
+  const btn=$('#interpretLatest'),orig=btn.textContent;btn.disabled=true;btn.textContent='AI 분석 중...';
+  $('#paperInsight').innerHTML='<span class="warn">Cloudflare Workers AI로 최신 모형을 해설하는 중입니다... (몇 초 정도 걸릴 수 있습니다)</span>';
+  try{
+    const d=await api('/api/interpret');
+    const badge=d.aiGenerated?`<span class="good">● AI 생성(${d.aiModel||'Workers AI'})</span>`:`<span class="warn">● 기본 요약(AI 미사용${d.aiError?': '+d.aiError:''})</span>`;
+    const notes=(d.coefficientNotes||[]).map((x)=>`<li>${x}</li>`).join('');
+    $('#paperInsight').innerHTML=`<div style="margin-bottom:8px">${badge}</div><b>${d.headline||''}</b><p>${d.summary||''}</p>${notes?`<h4>계수 해석</h4><ul>${notes}</ul>`:''}<h4>주의사항</h4><ul>${(d.cautions||[]).map(x=>`<li>${x}</li>`).join('')}</ul>`;
+  }catch(e){$('#paperInsight').textContent=e.message}
+  finally{btn.disabled=false;btn.textContent=orig}
+};
+function uploadWithProgress(path,payload,onProgress){
+  return new Promise((resolve,reject)=>{
+    const xhr=new XMLHttpRequest();
+    xhr.open('POST',path);
+    xhr.setRequestHeader('content-type','application/json');
+    xhr.upload.onprogress=(ev)=>{if(ev.lengthComputable)onProgress(Math.round(ev.loaded/ev.total*100))};
+    xhr.upload.onload=()=>onProgress(100);
+    xhr.onload=()=>{
+      let d;try{d=JSON.parse(xhr.responseText)}catch{d={error:xhr.responseText}}
+      if(xhr.status>=200&&xhr.status<300)resolve(d);else reject(new Error(d.error||`요청 실패(HTTP ${xhr.status})`))
+    };
+    xhr.onerror=()=>reject(new Error('네트워크 오류로 업로드에 실패했습니다'));
+    xhr.send(JSON.stringify(payload));
+  });
+}
+function setImportProgress(pct,label){
+  const wrap=$('#importProgressWrap');if(!wrap)return;
+  wrap.style.display='block';
+  $('#importProgressBar').style.width=`${pct}%`;
+  $('#importProgressText').textContent=label||`${pct}%`;
+}
 $('#importBtn').onclick=async()=>{
   const f=$('#fileInput').files[0];if(!f)return alert('파일을 선택하세요');
   const btn=$('#importBtn'),orig=btn.textContent;btn.disabled=true;btn.textContent='가져오는 중...';$('#log').textContent='업로드 처리 중...';
+  setImportProgress(0,'파일 읽는 중...');
   try{
     let rows;
     if(f.name.endsWith('.json')){rows=JSON.parse(await f.text())}
@@ -67,11 +84,15 @@ $('#importBtn').onclick=async()=>{
       const head=lines.shift().map(x=>x.trim());
       rows=lines.filter(r=>r.some(Boolean)).map(r=>Object.fromEntries(head.map((k,i)=>[k,(r[i]??'').trim()])))
     }
-    const d=await api('/api/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:$('#importKind').value,rows})});
+    setImportProgress(0,'업로드 중... 0%');
+    const d=await uploadWithProgress('/api/import',{kind:$('#importKind').value,rows},(pct)=>{
+      setImportProgress(pct,pct<100?`업로드 중... ${pct}%`:'서버 처리 중...')
+    });
+    setImportProgress(100,`완료 · 저장 ${d.inserted??0} · 건너뜀 ${d.skipped??0}`);
     $('#log').textContent=JSON.stringify(d,null,2);
     await init();
-  }catch(e){$('#log').textContent=`업로드 실패: ${e.message}`}
-  finally{btn.disabled=false;btn.textContent=orig}
+  }catch(e){$('#log').textContent=`업로드 실패: ${e.message}`;setImportProgress(0,'실패')}
+  finally{btn.disabled=false;btn.textContent=orig;setTimeout(()=>{const w=$('#importProgressWrap');if(w)w.style.display='none'},4000)}
 };
 $('#normalizeBtn').onclick=async()=>{
   const btn=$('#normalizeBtn'),orig=btn.textContent;btn.disabled=true;btn.textContent='정규화 중...';$('#log').textContent='FIFA 211 정규화 실행 중...';
