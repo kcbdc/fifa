@@ -179,13 +179,32 @@ tryCatch({
   coef_mat$odds_ratio <- exp(coef_mat$estimate)
   write.csv(coef_mat, "artifacts/coefficients.csv", row.names = FALSE)
 
-  png("artifacts/mcmc-diagnostics.png", width = 1400, height = 900, res = 150)
-  mcmc.diagnostics(fit)
-  dev.off()
-  gof_obj <- gof(fit)
-  png("artifacts/gof.png", width = 1400, height = 900, res = 150)
-  plot(gof_obj)
-  dev.off()
+  mcmc_diag_ok <- TRUE
+  mcmc_diag_note <- NULL
+  tryCatch({
+    png("artifacts/mcmc-diagnostics.png", width = 1400, height = 900, res = 150)
+    mcmc.diagnostics(fit)
+    dev.off()
+  }, error = function(err) {
+    if (!is.null(dev.list())) dev.off()
+    mcmc_diag_ok <<- FALSE
+    mcmc_diag_note <<- conditionMessage(err)
+    message("MCMC diagnostics skipped (likely a dyad-independent MPLE-only fit with no MCMC sample): ", mcmc_diag_note)
+  })
+
+  gof_note <- NULL
+  gof_obj <- tryCatch({
+    g <- gof(fit)
+    png("artifacts/gof.png", width = 1400, height = 900, res = 150)
+    plot(g)
+    dev.off()
+    g
+  }, error = function(err) {
+    if (!is.null(dev.list())) dev.off()
+    gof_note <<- conditionMessage(err)
+    message("GOF plot skipped: ", gof_note)
+    NULL
+  })
 
   converged <- all(is.finite(coef_mat$estimate))
   coefficient_rows <- lapply(seq_len(nrow(coef_mat)), function(i) as.list(coef_mat[i, , drop = FALSE]))
@@ -194,9 +213,12 @@ tryCatch({
                  node_count = network.size(net), edge_count = network.edgecount(net),
                  input_counts = list(teams = nrow(teams), matches = nrow(matches), rankings = nrow(rankings)),
                  aic = unname(AIC(fit)), bic = unname(BIC(fit)), coefficients = coefficient_rows,
+                 mcmc_used = mcmc_diag_ok, gof_available = !is.null(gof_obj),
                  validation = validation)
   diagnostics <- list(seed = 20260728, session = capture.output(sessionInfo()),
-                      gof = capture.output(print(gof_obj)), coefficient_columns = col_names, model_attempts = attempts)
+                      gof = if (!is.null(gof_obj)) capture.output(print(gof_obj)) else list(skipped = TRUE, reason = gof_note),
+                      mcmc_diagnostics = if (mcmc_diag_ok) "ok" else list(skipped = TRUE, reason = mcmc_diag_note, note = "dyad-independent formulas (e.g. plain edges) are estimated by MPLE only; no MCMC sample is produced, so diagnostics are not applicable."),
+                      coefficient_columns = col_names, model_attempts = attempts)
   write_json(list(result = result, diagnostics = diagnostics), "artifacts/model-result.json",
              pretty = TRUE, auto_unbox = TRUE, null = "null")
   writeLines(c(sprintf("Input: teams=%d matches=%d rankings=%d", nrow(teams), nrow(matches), nrow(rankings)),
