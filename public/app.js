@@ -1,6 +1,6 @@
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 async function api(path,opt){const r=await fetch(path,opt);let d;try{d=await r.json()}catch{d={error:await r.text()}}if(!r.ok)throw new Error(d.error||'요청 실패');return d}
-function show(view){$$('.view').forEach(x=>x.classList.toggle('active',x.id===view));window.scrollTo(0,0);if(view==='home')init();if(view==='model')autoGithubDiagnostic();else if(typeof stopGithubPoll==='function')stopGithubPoll();if(view==='analytics')loadAnalytics()}
+function show(view){$$('.view').forEach(x=>x.classList.toggle('active',x.id===view));window.scrollTo(0,0);if(view==='home')init();if(view==='model')autoGithubDiagnostic();else if(typeof stopGithubPoll==='function')stopGithubPoll();if(view==='analytics')loadAnalytics();if(view==='paper')loadGofRunList()}
 $$('nav button').forEach(b=>b.onclick=()=>show(b.dataset.view));
 
 // v34: 전수 점검 결과 12개 버튼이 클릭해도 즉시 아무 반응이 없어서(응답이 올 때까지
@@ -113,6 +113,33 @@ $('#interpretLatest').onclick=async()=>{
   }catch(e){$('#paperInsight').textContent=e.message}
   finally{btn.disabled=false;btn.textContent=orig}
 };
+function statusLabelKo(s){return({queued:'대기중',dispatched:'실행요청됨',running:'실행중',completed:'완료',failed:'실패',dispatch_failed:'디스패치실패',validation_failed:'검증실패'}[s]||s||'-')}
+function formatKoTime(raw){
+  if(!raw)return '';
+  let s=String(raw);
+  if(!/[Zz]|\+\d\d:\d\d$/.test(s))s=s.replace(' ','T')+'Z'; // D1의 CURRENT_TIMESTAMP는 타임존 표기가 없는 UTC라서 명시적으로 Z를 붙여야 브라우저가 로컬시간으로 정확히 변환합니다.
+  const d=new Date(s);
+  if(isNaN(d))return raw;
+  return d.toLocaleString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+async function loadGofRunList(){
+  const sel=$('#gofRunId');if(!sel)return;
+  const prevValue=sel.value;
+  sel.innerHTML='<option value="">목록을 불러오는 중...</option>';
+  try{
+    const rows=await api('/api/models');
+    if(!rows.length){sel.innerHTML='<option value="">실행된 모형이 없습니다</option>';return}
+    sel.innerHTML=rows.map(r=>{
+      const time=formatKoTime(r.finished_at||r.started_at||r.created_at);
+      const label=`#${r.id} · ${r.model_name||'ERGM'} · ${r.network_type==='win'?'승리 네트워크':'경기 네트워크'} · ${statusLabelKo(r.status)}${time?' · '+time:''}`;
+      return `<option value="${r.id}">${label}</option>`;
+    }).join('');
+    // 이전에 선택돼 있던 실행번호가 목록에 아직 있으면 유지, 없으면 완료된 것 중 최신을 자동 선택
+    if(prevValue&&rows.some(r=>String(r.id)===prevValue))sel.value=prevValue;
+    else{const firstCompleted=rows.find(r=>r.status==='completed');sel.value=String(firstCompleted?firstCompleted.id:rows[0].id)}
+  }catch(e){sel.innerHTML=`<option value="">목록을 불러오지 못했습니다: ${e.message}</option>`}
+}
+$('#gofRefreshBtn').onclick=withBusy($('#gofRefreshBtn'),loadGofRunList,{loadingText:'새로고침 중...'});
 const doGofView=withBusy($('#gofViewBtn'),async()=>{
   const id=$('#gofRunId').value;
   const d=await api(`/api/gof-report?id=${id}`);
@@ -130,12 +157,12 @@ const doGofView=withBusy($('#gofViewBtn'),async()=>{
     ${d.mcmcDiagnosticsNote?`<h4>MCMC 진단 참고</h4><p style="color:#91a7be">${d.mcmcDiagnosticsNote}</p>`:''}
   `;
 },{loadingText:'조회 중...',targetEl:$('#gofReportBox'),loadingHtml:'불러오는 중...'});
-$('#gofViewBtn').onclick=()=>{if(!$('#gofRunId').value)return alert('실행번호를 입력하세요');doGofView()};
+$('#gofViewBtn').onclick=()=>{if(!$('#gofRunId').value)return alert('실행할 모형을 목록에서 선택하세요');doGofView()};
 const doGofExport=withBusy($('#gofExportBtn'),async()=>{
   const id=$('#gofRunId').value;
   await downloadUrl(`/api/gof-report/export?id=${id}`,`gof-report-run-${id}.md`);
 },{loadingText:'내보내는 중...'});
-$('#gofExportBtn').onclick=()=>{if(!$('#gofRunId').value)return alert('실행번호를 입력하세요');doGofExport()};
+$('#gofExportBtn').onclick=()=>{if(!$('#gofRunId').value)return alert('실행할 모형을 목록에서 선택하세요');doGofExport()};
 
 function uploadWithProgress(path,payload,onProgress){
   return new Promise((resolve,reject)=>{
