@@ -1,34 +1,36 @@
 # fifa-r-env: ERGM/TERGM 분석에 필요한 R 패키지를 미리 설치해둔 이미지.
 #
-# rocker/r-ver 이미지는 amd64에서 기본 CRAN 미러로 Posit Public Package Manager(RSPM/P3M)를
-# 이미 사용하도록 설정돼 있어서, install.packages()가 자동으로 컴파일된 바이너리 패키지를
-# 받아옵니다(별도 repos 설정 불필요) — GitHub Actions의 ubuntu-latest 러너와 같은 계열의
-# 리눅스라 바이너리 호환성도 맞습니다.
-#
-# 빌드: .github/workflows/build-r-image.yml (workflow_dispatch로 수동 실행)
-# 사용: .github/workflows/analyze-fast.yml (analyze.yml 검증 후 교체용 대안 워크플로)
+# v32: 첫 빌드가 "패키지 12개 중 하나가 library()에 실패"로 죽었는데, 어떤 패키지인지
+# 로그에 안 나와서 진단이 어려�웠습니다. 두 가지를 고쳤습니다.
+#   1) 소스 컴파일이 필요할 때 흔히 빠지는 시스템 라이브러리를 미리 더 넣었습니다
+#      (특히 igraph 패키지가 libglpk-dev/libgmp-dev 없이는 소스 빌드에 실패하는 경우가
+#      흔합니다. RSPM 바이너리가 있으면 필요 없지만, 혹시 없을 경우를 대비한 안전망입니다.)
+#   2) install/verify 단계를 패키지 하나하나 개별적으로 시도하고, 실패한 패키지 이름을
+#      정확히 나열한 뒤 exit하도록 바꿨습니다. 이제 실패하면 로그에 정확히 어떤
+#      패키지가 문제인지 나옵니다.
 FROM rocker/r-ver:4
 
-# httr2/curl 등이 런타임에 필요로 하는 시스템 라이브러리
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libcurl4-openssl-dev \
       libssl-dev \
       libxml2-dev \
       zlib1g-dev \
+      libglpk-dev \
+      libgmp-dev \
+      libblas-dev \
+      liblapack-dev \
+      gfortran \
+      cmake \
+      pkg-config \
       git-core \
     && rm -rf /var/lib/apt/lists/*
 
-# run_ergm.R / run_tergm.R가 실제로 필요로 하는 패키지 전체
-# (analyze.yml의 "Install and cache R dependencies" 스텝과 동일한 목록으로 유지)
-RUN R -q -e "install.packages(c( \
-      'jsonlite','httr2','network','ergm','sna','tergm', \
-      'networkDynamic','tsna','btergm','coda','texreg','igraph' \
-    ), Ncpus = max(1, parallel::detectCores()))"
+COPY r-analysis/required_packages.R /tmp/required_packages.R
 
-# 설치가 실제로 됐는지 빌드 시점에 바로 검증(빌드 실패로 조기에 문제를 드러냄)
-RUN R -q -e "invisible(sapply(c('jsonlite','httr2','network','ergm','sna','tergm', \
-      'networkDynamic','tsna','btergm','coda','texreg','igraph'), \
-      function(p) library(p, character.only = TRUE))); cat('OK: all packages load\n')"
+# 패키지를 하나씩 설치 시도하고, 실패해도 스크립트를 멈추지 않고 끝까지 돌면서
+# 실패 목록을 모읍니다. 마지막에 실패한 게 하나라도 있으면 그 이름을 정확히 출력하고
+# exit code 1로 종료해 이미지 빌드 자체가 실패하도록 합니다(조용히 넘어가지 않음).
+RUN Rscript /tmp/required_packages.R
 
 WORKDIR /work
 CMD ["R", "--version"]
