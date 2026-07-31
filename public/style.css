@@ -11,3 +11,13 @@
 /* v26 시간 구간 비교 */
 .period-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:12px}
 @media(max-width:760px){.period-grid{grid-template-columns:1fr}}
+
+/* v35: GitHub Actions 큐 대기 중 표시용 불확정(indeterminate) 진행바 */
+.indeterminate-track{position:relative;height:8px;border-radius:6px;background:#12253a;overflow:hidden;margin:10px 0}
+.indeterminate-bar{position:absolute;top:0;left:0;height:100%;width:40%;border-radius:6px;background:linear-gradient(90deg,#37a3ff,#55e5bd);animation:indet-slide 1.3s ease-in-out infinite}
+@keyframes indet-slide{
+  0%{left:-40%}
+  50%{left:60%}
+  100%{left:100%}
+}
+.wait-elapsed{color:#91a7be;font-size:12px}

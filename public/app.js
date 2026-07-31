@@ -210,7 +210,16 @@ function stepIcon(s){if(s.status==='completed')return s.conclusion==='success'?S
 function renderGithubStepProgress(d){
   const box=$('#githubStepProgress');if(!box)return;
   if(!d||!d.ok){box.style.display='block';box.innerHTML=`<b>GitHub 진행 상황</b><p class="warn">${d?.error||'조회할 수 없습니다.'}</p>`;return}
-  if(!d.steps||!d.steps.length){box.style.display='block';box.innerHTML=`<b>GitHub 진행 상황</b><p>${d.note||'대기 중입니다...'}</p>`;return}
+  if(!d.steps||!d.steps.length){
+    // v35: 아직 GitHub Actions 큐에서 실행이 뽑히지 않아 실제 진행률 데이터가 없는
+    // 상태입니다. 그냥 문구만 보여주면 "멈춘 건가?" 오해가 생기므로, 불확정(shimmer)
+    // 진행바와 경과시간 카운터를 함께 보여줘서 "기다리는 중"임을 눈으로 알 수 있게 합니다.
+    box.style.display='block';
+    box.innerHTML=`<b>GitHub 진행 상황</b><p>${d.note||'대기 중입니다...'}</p><div class="indeterminate-track"><div class="indeterminate-bar"></div></div><p class="wait-elapsed" id="githubWaitElapsed">GitHub Actions 큐에서 실행이 시작되길 기다리는 중입니다... (0초 경과)</p>`;
+    startWaitElapsedCounter();
+    return;
+  }
+  stopWaitElapsedCounter();
   box.style.display='block';
   // v29: analyze.yml이 여러 job(report-run/static-ergm/temporal-tergm/manifest)으로
   // 나뉘어 정적·시간적 모형이 병렬 실행되므로, job별로 묶어서 표시합니다.
@@ -219,10 +228,27 @@ function renderGithubStepProgress(d){
   const groups=[...byJob.entries()].map(([job,steps])=>`<div style="margin-top:8px"><b style="font-size:12px;color:#8fc9ff">${job}</b><ul class="step-list">${steps.map(s=>`<li>${stepIcon(s)} ${s.label}</li>`).join('')}</ul></div>`).join('');
   box.innerHTML=`<b>GitHub 진행 상황</b>${d.runUrl?` · <a href="${d.runUrl}" target="_blank" rel="noopener">Actions에서 보기</a>`:''}${groups}`;
 }
+let githubWaitStart=null,githubWaitTimer=null;
+function startWaitElapsedCounter(){
+  if(githubWaitTimer)return; // 이미 카운트 중이면 다시 시작하지 않음(초가 튀지 않도록)
+  githubWaitStart=Date.now();
+  const tick=()=>{
+    const el=$('#githubWaitElapsed');if(!el){stopWaitElapsedCounter();return}
+    const sec=Math.floor((Date.now()-githubWaitStart)/1000);
+    el.textContent=`GitHub Actions 큐에서 실행이 시작되길 기다리는 중입니다... (${sec}초 경과)${sec>60?' — 러너가 몰리면 1분 이상 걸릴 수 있습니다.':''}`;
+  };
+  tick();
+  githubWaitTimer=setInterval(tick,1000);
+}
+function stopWaitElapsedCounter(){if(githubWaitTimer){clearInterval(githubWaitTimer);githubWaitTimer=null;githubWaitStart=null}}
 let githubPollTimer=null;
-function stopGithubPoll(){if(githubPollTimer){clearInterval(githubPollTimer);githubPollTimer=null}}
+function stopGithubPoll(){if(githubPollTimer){clearInterval(githubPollTimer);githubPollTimer=null}stopWaitElapsedCounter()}
 function startGithubPoll(runId){
   stopGithubPoll();
+  // v35: 첫 폴링 응답(네트워크 왕복 필요)을 기다리지 않고, 폴링을 시작하는 즉시
+  // 대기 UI(불확정 진행바)를 먼저 보여줍니다 — 이 사이의 공백이 "멈춘 것 같다"는
+  // 오해의 마지막 틈이었습니다.
+  renderGithubStepProgress({ok:true,steps:[],note:'GitHub 실행 등록을 확인하는 중입니다...'});
   const tick=async()=>{
     try{
       const d=await api(`/api/github/run-progress?id=${runId}`);
