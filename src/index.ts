@@ -209,9 +209,14 @@ async function dashboard(e:Env){
 }
 async function network(e:Env,u:URL){
   const from=u.searchParams.get('from')||months(Number(e.DATA_WINDOW_YEARS||4))[0]+'-01',to=u.searchParams.get('to')||iso(),type=u.searchParams.get('type')||'match';
+  // v33: stage/importance 컬럼은 수집 파이프라인에서 실제로 채워지지 않아(항상 NULL/기본값)
+  // 필터 기준으로 쓸 수 없습니다. 대신 실제로 채워지는 competition(대회명) 필드로
+  // "친선전(Friendly)" 여부를 구분합니다 — 원본 소스(martj42/international_results)의
+  // tournament 컬럼이 그대로 들어오며, 친선전은 정확히 "Friendly" 값을 가집니다.
+  const matchType=u.searchParams.get('matchType')||'all'; // all | official | friendly
   const [members,q]=await Promise.all([
     e.DB.prepare(`SELECT fifa_code,name_en,confederation FROM teams WHERE is_fifa_member=1 AND active=1 ORDER BY fifa_code`).all<any>(),
-    e.DB.prepare(`SELECT m.match_date,m.home_score,m.away_score,h.fifa_code hcode,h.name_en hname,h.confederation hconf,a.fifa_code acode,a.name_en aname,a.confederation aconf FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE m.match_date BETWEEN ? AND ? AND h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1`).bind(from,to).all<any>()
+    e.DB.prepare(`SELECT m.match_date,m.home_score,m.away_score,h.fifa_code hcode,h.name_en hname,h.confederation hconf,a.fifa_code acode,a.name_en aname,a.confederation aconf FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE m.match_date BETWEEN ? AND ? AND h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1 AND (?='all' OR (?='friendly' AND m.competition LIKE '%Friendly%') OR (?='official' AND (m.competition IS NULL OR m.competition NOT LIKE '%Friendly%')))`).bind(from,to,matchType,matchType,matchType).all<any>()
   ]);
   const ns=new Map<string,any>(),ls=new Map<string,any>();
   // FIFA 211개 회원국을 먼저 등록하여 분석기간 중 경기가 없는 국가도 고립 노드로 보존한다.
@@ -225,7 +230,7 @@ async function network(e:Env,u:URL){
   }
   const incident=new Set<string>();for(const l of ls.values()){incident.add(l.source);incident.add(l.target)}
   for(const n of ns.values())n.isolate=!incident.has(n.id);
-  return{nodes:[...ns.values()],links:[...ls.values()],meta:{from,to,type,matches:q.results.length,memberCount:members.results.length,isolateCount:[...ns.values()].filter((x:any)=>x.isolate).length}}
+  return{nodes:[...ns.values()],links:[...ls.values()],meta:{from,to,type,matchType,matches:q.results.length,memberCount:members.results.length,isolateCount:[...ns.values()].filter((x:any)=>x.isolate).length}}
 }
 async function quality(e:Env){
   const [members,rawTeams,memberMatches,invalid,excluded,duplicateSummary,latestRanking,matchedTeams,dateRange] = await Promise.all([
@@ -367,8 +372,8 @@ async function triggerGithub(e:Env,runId:number,analysisMode:'both'|'ergm'|'terg
 
 
 async function advancedAnalytics(e:Env,u:URL){
-  const from=u.searchParams.get('from')||months(Number(e.DATA_WINDOW_YEARS||4))[0]+'-01',to=u.searchParams.get('to')||iso(),type=u.searchParams.get('type')||'win';
-  const data=await network(e,new URL(`/api/network?from=${from}&to=${to}&type=${type}`,'https://local'));
+  const from=u.searchParams.get('from')||months(Number(e.DATA_WINDOW_YEARS||4))[0]+'-01',to=u.searchParams.get('to')||iso(),type=u.searchParams.get('type')||'win',matchType=u.searchParams.get('matchType')||'all';
+  const data=await network(e,new URL(`/api/network?from=${from}&to=${to}&type=${type}&matchType=${matchType}`,'https://local'));
   const nodes=data.nodes||[],links=data.links||[],ids=nodes.map((n:any)=>n.id),index=new Map(ids.map((id:string,i:number)=>[id,i]));
   const out=Array(ids.length).fill(0),inc=Array(ids.length).fill(0),adj=Array.from({length:ids.length},()=>new Set<number>());
   for(const l of links){const a=index.get(l.source),b=index.get(l.target);if(a===undefined||b===undefined)continue;out[a]+=Number(l.value||1);inc[b]+=Number(l.value||1);adj[a].add(b);adj[b].add(a)}
@@ -377,7 +382,81 @@ async function advancedAnalytics(e:Env,u:URL){
   const component=Array(ids.length).fill(-1);let cid=0;for(let i=0;i<ids.length;i++){if(component[i]>=0)continue;const q=[i];component[i]=cid;while(q.length){const x=q.shift()!;for(const y of adj[x])if(component[y]<0){component[y]=cid;q.push(y)}}cid++}
   const rows=nodes.map((n:any,i:number)=>({code:n.id,name:n.label,confederation:n.group,outDegree:out[i],inDegree:inc[i],totalDegree:out[i]+inc[i],pageRank:Number(pr[i].toFixed(6)),community:component[i]+1})).sort((a:any,b:any)=>b.pageRank-a.pageRank);
   const conf:any={};for(const r of rows){conf[r.confederation]??={nodes:0,totalDegree:0};conf[r.confederation].nodes++;conf[r.confederation].totalDegree+=r.totalDegree}
-  return{meta:{from,to,type,nodeCount:nodes.length,edgeCount:links.length,communities:cid},top:rows.slice(0,25),all:rows,confederations:Object.entries(conf).map(([name,v]:any)=>({name,...v,averageDegree:Number((v.totalDegree/v.nodes).toFixed(2))}))}
+  return{meta:{from,to,type,matchType,nodeCount:nodes.length,edgeCount:links.length,communities:cid},top:rows.slice(0,25),all:rows,confederations:Object.entries(conf).map(([name,v]:any)=>({name,...v,averageDegree:Number((v.totalDegree/v.nodes).toFixed(2))}))}
+}
+// v33 제안 #2: 완전 무작위 네트워크(Erdős–Rényi, 같은 노드 수·같은 밀도) 대비 실제 네트워크의
+// 군집 정도·연결 편차를 비교합니다. 방향은 무시하고(단순화) 무방향 그래프로 취급합니다.
+// ER 무작위 그래프에서는 이론적으로 전역 군집계수(clustering coefficient) ≈ 연결확률 p이고,
+// 차수 분산 ≈ n·p·(1-p)이므로, 이 값들과 실제 관측치의 비율로 "얼마나 비무작위적인가"를 표현합니다.
+async function nullModelComparison(e:Env,u:URL){
+  const type=u.searchParams.get('type')||'win',matchType=u.searchParams.get('matchType')||'all';
+  const from=u.searchParams.get('from')||months(Number(e.DATA_WINDOW_YEARS||4))[0]+'-01',to=u.searchParams.get('to')||iso();
+  const data=await network(e,new URL(`/api/network?from=${from}&to=${to}&type=${type}&matchType=${matchType}`,'https://local'));
+  const nodes=(data.nodes||[]).filter((n:any)=>!n.isolate); // 고립 노드는 정의상 군집·차수 분석에 기여하지 않으므로 제외
+  const ids=nodes.map((n:any)=>n.id),n=ids.length,index=new Map(ids.map((id:string,i:number)=>[id,i]));
+  const adj=Array.from({length:n},()=>new Set<number>());
+  for(const l of (data.links||[])){const a=index.get(l.source),b=index.get(l.target);if(a===undefined||b===undefined||a===b)continue;adj[a].add(b);adj[b].add(a)}
+  const m=adj.reduce((s,x)=>s+x.size,0)/2;
+  const density=n>1?(2*m)/(n*(n-1)):0;
+  const degrees=adj.map(s=>s.size);
+  const degreeMean=n?degrees.reduce((a,b)=>a+b,0)/n:0;
+  const degreeVar=n?degrees.reduce((s,d)=>s+(d-degreeMean)**2,0)/n:0;
+  let triangles=0,triples=0;
+  for(let i=0;i<n;i++){
+    const neigh=[...adj[i]];
+    for(let a=0;a<neigh.length;a++)for(let b=a+1;b<neigh.length;b++){
+      triples++;
+      if(adj[neigh[a]].has(neigh[b]))triangles++;
+    }
+  }
+  const observedClustering=triples?triangles/triples:0; // triangles는 각 삼각형을 3번씩 셌지만 triples도 같은 배수로 세므로 비율은 정확함
+  const expectedClusteringER=density; // ER 그래프의 이론적 군집계수는 연결확률 p와 같음
+  const expectedDegreeVarER=n>1?(n-1)*density*(1-density):0;
+  const clusteringRatio=expectedClusteringER>0?Number((observedClustering/expectedClusteringER).toFixed(3)):null;
+  const degreeVarRatio=expectedDegreeVarER>0?Number((degreeVar/expectedDegreeVarER).toFixed(3)):null;
+  return{
+    ok:true,type,matchType,from,to,
+    n,m,density:Number(density.toFixed(4)),
+    observed:{clustering:Number(observedClustering.toFixed(4)),degreeMean:Number(degreeMean.toFixed(2)),degreeVariance:Number(degreeVar.toFixed(2))},
+    erNullModel:{clustering:Number(expectedClusteringER.toFixed(4)),degreeVariance:Number(expectedDegreeVarER.toFixed(2))},
+    clusteringRatio,degreeVarianceRatio:degreeVarRatio,
+    interpretation: clusteringRatio===null?'노드/엣지가 너무 적어 비교할 수 없습니다.':
+      clusteringRatio>1.5?`관측된 군집계수가 무작위 그래프 기대값의 약 ${clusteringRatio}배로, 우연이라 보기 어려운 뚜렷한 군집 구조(예: 지역 내 반복 대결)가 있음을 시사합니다.`:
+      clusteringRatio<0.7?`관측된 군집계수가 무작위 그래프 기대값보다 낮아(약 ${clusteringRatio}배), 군집보다는 폭넓게 흩어진 연결 패턴을 보입니다.`:
+      `관측된 군집계수(${clusteringRatio}배)가 무작위 그래프와 크게 다르지 않아, 이 지표만으로는 뚜렷한 비무작위 구조를 단정하기 어렵습니다.`
+  }
+}
+// v33 제안 #3: "같은 대륙연맹" 효과가 모든 대륙에서 동일하게 작동하는지 보기 위해,
+// 대륙연맹별 하위 네트워크(해당 대륙 소속 국가들 사이의 연결만) 구조를 비교합니다.
+// 실제 R ERGM을 대륙별로 재적합하는 건 아니며(그건 [ERGM] 탭에서 데이터를 나눠 별도 실행해야
+// 함), Worker 단에서 즉시 계산 가능한 구조적 이질성 지표(밀도·평균연결)를 제공합니다.
+async function confederationBreakdown(e:Env,u:URL){
+  const type=u.searchParams.get('type')||'win',matchType=u.searchParams.get('matchType')||'all';
+  const from=u.searchParams.get('from')||months(Number(e.DATA_WINDOW_YEARS||4))[0]+'-01',to=u.searchParams.get('to')||iso();
+  const data=await network(e,new URL(`/api/network?from=${from}&to=${to}&type=${type}&matchType=${matchType}`,'https://local'));
+  const nodes=data.nodes||[],links=data.links||[];
+  const groupOf=new Map(nodes.map((n:any)=>[n.id,n.group]));
+  const confs=[...new Set(nodes.map((n:any)=>n.group))].sort();
+  let withinEdges=0,crossEdges=0;
+  const byConf:Record<string,{nodes:Set<string>;edges:number}>={};
+  for(const c of confs)byConf[c]={nodes:new Set(),edges:0};
+  for(const n2 of nodes){if(!n2.isolate)byConf[n2.group]?.nodes.add(n2.id)}
+  for(const l of links){
+    const gs=groupOf.get(l.source),gt=groupOf.get(l.target);
+    if(gs&&gt&&gs===gt){withinEdges++;byConf[gs].edges++}
+    else crossEdges++;
+  }
+  const rows=confs.map(c=>{
+    const nn=byConf[c].nodes.size,mm=byConf[c].edges,density=nn>1?(2*mm)/(nn*(nn-1)):0;
+    return{confederation:c,nodeCount:nn,withinEdgeCount:mm,density:Number(density.toFixed(4)),averageDegree:nn?Number((2*mm/nn).toFixed(2)):0}
+  }).sort((a,b)=>b.density-a.density);
+  const totalEdges=withinEdges+crossEdges;
+  return{
+    ok:true,type,matchType,from,to,
+    confederations:rows,
+    homophily:{withinEdges,crossEdges,withinShare:totalEdges?Number((withinEdges/totalEdges).toFixed(4)):0},
+    note:'같은 대륙연맹 소속 국가끼리의 연결 비율(withinShare)이 높을수록 "같은 대륙" ERGM 계수가 유의할 개연성이 큽니다. 대륙별 밀도 차이가 크면(예: 최댓값/최솟값 비율이 크면) 그 효과가 특정 대륙에 편중됐을 수 있어, 대륙별 부분표본으로 별도 모형을 돌려 확인하는 것을 권장합니다.'
+  }
 }
 async function gofReport(e:Env,runId:number){
   const x=await e.DB.prepare('SELECT * FROM model_runs WHERE id=?').bind(runId).first<any>();
@@ -388,6 +467,8 @@ async function gofReport(e:Env,runId:number){
   if(x.status!=='completed')return{ok:true,runId:x.id,status:x.status,note:'모형이 아직 완료되지 않아 GOF 리포트를 생성할 수 없습니다. GitHub Actions 완료 후 다시 조회하십시오.'};
   const gofText=Array.isArray(diag.gof)?diag.gof:(diag.gof&&typeof diag.gof==='object'?[`(GOF 생략됨: ${diag.gof.reason||'사유 미상'})`]:[]);
   const mcmcNote=typeof diag.mcmc_diagnostics==='string'?null:(diag.mcmc_diagnostics?.reason||null);
+  const coefficients=result.coefficients||[];
+  const effectSizes=buildEffectSizes(coefficients);
   return{
     ok:true,runId:x.id,status:x.status,
     modelName:x.model_name,networkType:x.network_type,
@@ -398,14 +479,42 @@ async function gofReport(e:Env,runId:number){
     nodeCount:result.node_count??null,edgeCount:result.edge_count??null,
     inputCounts:result.input_counts||null,
     mcmcUsed:result.mcmc_used!==false,gofAvailable:result.gof_available!==false,
-    coefficients:result.coefficients||[],
+    coefficients,effectSizes,
     gofText,mcmcDiagnosticsNote:mcmcNote,
     createdAt:x.created_at,finishedAt:x.finished_at,generatedAt:new Date().toISOString()
   }
 }
+// v33 제안 #4: log-odds(estimate)만으로는 논문 독자가 "그래서 실질적으로 얼마나 큰 효과인가"를
+// 가늠하기 어렵습니다. edges 항을 절편(baseline log-odds)으로 보고, 나머지 각 항이 1단위
+// 늘어날 때 tie 형성 확률이 몇 %p 변하는지 로지스틱 함수로 환산합니다.
+// 주의: 로지스틱 함수는 비선형이라 이 값은 "다른 조건이 전부 기준값(0)일 때"라는 전제가
+// 붙는 근사치입니다 — 논문에는 이 전제를 함께 명시해야 합니다.
+function sigmoid(x:number):number{return 1/(1+Math.exp(-x))}
+function buildEffectSizes(coefficients:any[]):any[]{
+  const edgesTerm=coefficients.find((c:any)=>/^edges$/i.test(String(c.term||'').trim()));
+  if(!edgesTerm)return[];
+  const baseline=Number(edgesTerm.estimate);
+  if(!Number.isFinite(baseline))return[];
+  const baselineProb=sigmoid(baseline);
+  return coefficients.filter((c:any)=>!/^edges$/i.test(String(c.term||'').trim())).map((c:any)=>{
+    const est=Number(c.estimate);
+    if(!Number.isFinite(est))return{term:c.term,note:'estimate 값이 유효하지 않아 환산할 수 없습니다.'};
+    const newProb=sigmoid(baseline+est);
+    const deltaPP=(newProb-baselineProb)*100;
+    return{
+      term:c.term,
+      baselineProbability:Number((baselineProb*100).toFixed(2)),
+      newProbability:Number((newProb*100).toFixed(2)),
+      deltaPercentagePoints:Number(deltaPP.toFixed(2)),
+      note:`edges만 있을 때 기준 tie 형성확률 ${(baselineProb*100).toFixed(1)}%에서, ${c.term}이(가) 1단위 늘면(다른 항은 0으로 고정) 약 ${(newProb*100).toFixed(1)}%로 ${deltaPP>=0?'+':''}${deltaPP.toFixed(1)}%p 변화합니다.`
+    }
+  });
+}
 function gofReportMarkdown(r:any):string{
   const coefRows=(r.coefficients||[]).map((c:any)=>`| ${c.term} | ${Number(c.estimate).toFixed(4)} | ${Number(c.std_error).toFixed(4)} | ${Number(c.p_value).toFixed(4)} | ${Number(c.odds_ratio).toFixed(3)} |`).join('\n');
-  return `# GOF·모형 적합도 리포트 — 실행번호 #${r.runId}\n\n생성일시: ${r.generatedAt}\n\n## 모형 개요\n\n- 모형명: ${r.modelName||'-'}\n- 네트워크 종류: ${r.networkType||'-'}\n- 사용된 공식: \`${r.formula||'-'}\`${r.fallbackUsed?` (요청식 \`${r.requestedFormula}\`이 수렴하지 않아 자동 단순화됨)`:''}\n- 수렴 여부: ${r.converged?'수렴':'미수렴/확인 필요'}\n- AIC: ${r.aic??'-'} · BIC: ${r.bic??'-'}\n- 노드/엣지 수: ${r.nodeCount??'-'} / ${r.edgeCount??'-'}\n- 입력 데이터: 팀 ${r.inputCounts?.teams??'-'}개, 경기 ${r.inputCounts?.matches??'-'}건, 랭킹 ${r.inputCounts?.rankings??'-'}건\n- MCMC 사용 여부: ${r.mcmcUsed?'예 (dyad-dependent 항 포함)':'아니오 (dyad-independent, MPLE로 직접 추정)'}\n- GOF 계산 가능 여부: ${r.gofAvailable?'예':'아니오'}\n\n## 계수 추정치\n\n| 항 | Estimate | SE | p-value | Odds Ratio |\n|---|---|---|---|---|\n${coefRows||'| (계수 없음) | | | | |'}\n\n## GOF(적합도) 원본 출력\n\n\`\`\`\n${(r.gofText||[]).join('\n')||'(GOF 출력 없음)'}\n\`\`\`\n${r.mcmcDiagnosticsNote?`\n## MCMC 진단 참고\n\n${r.mcmcDiagnosticsNote}\n`:''}\n---\n*이 리포트는 FIFA Network Lab에서 자동 생성되었습니다. 논문에 인용 시 위 계수·적합도 수치를 연구자가 직접 검토한 뒤 보고하십시오.*\n`;
+  const effectRows=(r.effectSizes||[]).filter((x:any)=>x.deltaPercentagePoints!==undefined).map((x:any)=>`| ${x.term} | ${x.baselineProbability}% | ${x.newProbability}% | ${x.deltaPercentagePoints>=0?'+':''}${x.deltaPercentagePoints}%p |`).join('\n');
+  const effectSection=effectRows?`\n## 실질적 효과 크기 (확률 단위 환산)\n\n로지스틱 함수로 환산한 근사치이며, "다른 모든 항이 0(기준값)일 때"라는 전제가 붙습니다.\n\n| 항 | 기준 확률(edges만) | 1단위 증가 시 확률 | 변화(%p) |\n|---|---|---|---|\n${effectRows}\n`:'';
+  return `# GOF·모형 적합도 리포트 — 실행번호 #${r.runId}\n\n생성일시: ${r.generatedAt}\n\n## 모형 개요\n\n- 모형명: ${r.modelName||'-'}\n- 네트워크 종류: ${r.networkType||'-'}\n- 사용된 공식: \`${r.formula||'-'}\`${r.fallbackUsed?` (요청식 \`${r.requestedFormula}\`이 수렴하지 않아 자동 단순화됨)`:''}\n- 수렴 여부: ${r.converged?'수렴':'미수렴/확인 필요'}\n- AIC: ${r.aic??'-'} · BIC: ${r.bic??'-'}\n- 노드/엣지 수: ${r.nodeCount??'-'} / ${r.edgeCount??'-'}\n- 입력 데이터: 팀 ${r.inputCounts?.teams??'-'}개, 경기 ${r.inputCounts?.matches??'-'}건, 랭킹 ${r.inputCounts?.rankings??'-'}건\n- MCMC 사용 여부: ${r.mcmcUsed?'예 (dyad-dependent 항 포함)':'아니오 (dyad-independent, MPLE로 직접 추정)'}\n- GOF 계산 가능 여부: ${r.gofAvailable?'예':'아니오'}\n\n## 계수 추정치\n\n| 항 | Estimate | SE | p-value | Odds Ratio |\n|---|---|---|---|---|\n${coefRows||'| (계수 없음) | | | | |'}\n${effectSection}\n## GOF(적합도) 원본 출력\n\n\`\`\`\n${(r.gofText||[]).join('\n')||'(GOF 출력 없음)'}\n\`\`\`\n${r.mcmcDiagnosticsNote?`\n## MCMC 진단 참고\n\n${r.mcmcDiagnosticsNote}\n`:''}\n---\n*이 리포트는 FIFA Network Lab에서 자동 생성되었습니다. 논문에 인용 시 위 계수·적합도 수치를 연구자가 직접 검토한 뒤 보고하십시오.*\n`;
 }
 async function periodComparison(e:Env,type:string,aFrom:string,aTo:string,bFrom:string,bTo:string){
   const [a,b]=await Promise.all([
@@ -586,7 +695,7 @@ async function systemHealth(e:Env){
   }
 }
 export default {
- async fetch(r:Request,e:Env){try{const u=new URL(r.url),p=u.pathname;if(p==='/api/health'){const h=await systemHealth(e);return j(h,h.ok?200:503)};if(p==='/api/provider')return j({provider:'free-open-sources-v11-fifa211',...cfg(e),progress:await progress(e),apiKeyRequired:false});if(p==='/api/provider/test'){const c=cfg(e),tests=[];for(const [name,url] of Object.entries(c)){if(typeof url!=='string'||!url.startsWith('http'))continue;try{const res=await fetch(url,{headers:{Range:'bytes=0-128'}});tests.push({name,url,ok:res.ok,status:res.status})}catch(x){tests.push({name,url,ok:false,error:String(x)})}}return j({ok:tests.every((x:any)=>x.ok),results:tests})}if(p==='/api/dashboard')return cachedJson(r,45,()=>dashboard(e));if(p==='/api/temporal-network')return cachedJson(r,120,()=>temporalNetwork(e,u));if(p==='/api/export/graphml')return await graphExport(e,u,'graphml');if(p==='/api/export/gexf')return await graphExport(e,u,'gexf');if(p==='/api/citation'){const f=u.searchParams.get('format')||'bibtex';return new Response(citationText(f),{headers:{'content-type':'text/plain;charset=utf-8','content-disposition':`attachment; filename="fifa-network-lab.${f==='ris'?'ris':f==='apa'?'txt':'bib'}"`}})}if(p==='/api/projects'&&r.method==='GET')return j(await listProjects(e));if(p==='/api/projects'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await createProject(r,e),201)}if(p==='/api/dataset-freeze'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;return j(await freezeDataset(e,b.name||'Research Dataset',b.projectId?Number(b.projectId):null),201)}if(p==='/api/reproducibility-report')return j(await reproducibilityReport(e));if(p==='/api/analytics')return cachedJson(r,45,()=>advancedAnalytics(e,u));if(p==='/api/gof-report'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);return j(await gofReport(e,id))}
+ async fetch(r:Request,e:Env){try{const u=new URL(r.url),p=u.pathname;if(p==='/api/health'){const h=await systemHealth(e);return j(h,h.ok?200:503)};if(p==='/api/provider')return j({provider:'free-open-sources-v11-fifa211',...cfg(e),progress:await progress(e),apiKeyRequired:false});if(p==='/api/provider/test'){const c=cfg(e),tests=[];for(const [name,url] of Object.entries(c)){if(typeof url!=='string'||!url.startsWith('http'))continue;try{const res=await fetch(url,{headers:{Range:'bytes=0-128'}});tests.push({name,url,ok:res.ok,status:res.status})}catch(x){tests.push({name,url,ok:false,error:String(x)})}}return j({ok:tests.every((x:any)=>x.ok),results:tests})}if(p==='/api/dashboard')return cachedJson(r,45,()=>dashboard(e));if(p==='/api/temporal-network')return cachedJson(r,120,()=>temporalNetwork(e,u));if(p==='/api/export/graphml')return await graphExport(e,u,'graphml');if(p==='/api/export/gexf')return await graphExport(e,u,'gexf');if(p==='/api/citation'){const f=u.searchParams.get('format')||'bibtex';return new Response(citationText(f),{headers:{'content-type':'text/plain;charset=utf-8','content-disposition':`attachment; filename="fifa-network-lab.${f==='ris'?'ris':f==='apa'?'txt':'bib'}"`}})}if(p==='/api/projects'&&r.method==='GET')return j(await listProjects(e));if(p==='/api/projects'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await createProject(r,e),201)}if(p==='/api/dataset-freeze'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;return j(await freezeDataset(e,b.name||'Research Dataset',b.projectId?Number(b.projectId):null),201)}if(p==='/api/reproducibility-report')return j(await reproducibilityReport(e));if(p==='/api/analytics')return cachedJson(r,45,()=>advancedAnalytics(e,u));if(p==='/api/null-model')return cachedJson(r,60,()=>nullModelComparison(e,u));if(p==='/api/confederation-breakdown')return cachedJson(r,60,()=>confederationBreakdown(e,u));if(p==='/api/gof-report'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);return j(await gofReport(e,id))}
 if(p==='/api/gof-report/export'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);const rep=await gofReport(e,id);if(!rep.ok||!rep.formula)return j(rep,404);return new Response(gofReportMarkdown(rep),{headers:{'content-type':'text/markdown;charset=utf-8','content-disposition':`attachment; filename="gof-report-run-${id}.md"`}})}
 if(p==='/api/period-comparison'){const type=u.searchParams.get('type')||'win',aFrom=u.searchParams.get('aFrom'),aTo=u.searchParams.get('aTo'),bFrom=u.searchParams.get('bFrom'),bTo=u.searchParams.get('bTo');if(!aFrom||!aTo||!bFrom||!bTo)return j({error:'aFrom, aTo, bFrom, bTo가 모두 필요합니다.'},400);return cachedJson(r,60,()=>periodComparison(e,type,aFrom,aTo,bFrom,bTo))}
 if(p==='/api/model-comparison')return j(await modelComparison(e));if(p==='/api/reproducibility')return j(await reproducibilityPackage(e));if(p==='/api/interpret'){

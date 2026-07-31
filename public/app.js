@@ -62,11 +62,13 @@ $('#gofViewBtn').onclick=async()=>{
     if(!d.ok){$('#gofReportBox').textContent=d.error||'리포트를 생성할 수 없습니다.';return}
     if(d.note){$('#gofReportBox').textContent=d.note;return}
     const coefRows=(d.coefficients||[]).map(c=>`<tr><td>${c.term}</td><td>${Number(c.estimate).toFixed(4)}</td><td>${Number(c.std_error).toFixed(4)}</td><td>${Number(c.p_value).toFixed(4)}</td><td>${Number(c.odds_ratio).toFixed(3)}</td></tr>`).join('');
+    const effectRows=(d.effectSizes||[]).filter(x=>x.deltaPercentagePoints!==undefined).map(x=>`<tr><td>${x.term}</td><td>${x.baselineProbability}%</td><td>${x.newProbability}%</td><td style="color:${x.deltaPercentagePoints>=0?'#5fd58e':'#e0715f'}">${x.deltaPercentagePoints>=0?'+':''}${x.deltaPercentagePoints}%p</td></tr>`).join('');
     $('#gofReportBox').innerHTML=`
       <div style="margin-bottom:8px"><b>${d.modelName||''}</b> · ${d.networkType==='win'?'승리 네트워크':'경기 네트워크'} · 실행번호 #${d.runId}</div>
       <div style="margin-bottom:8px">공식: <code>${d.formula||'-'}</code>${d.fallbackUsed?' <span class="warn">(자동 단순화됨)</span>':''}</div>
       <div style="margin-bottom:8px">AIC ${d.aic??'-'} · BIC ${d.bic??'-'} · 수렴 ${d.converged?'예':'확인 필요'} · MCMC 사용 ${d.mcmcUsed?'예':'아니오(MPLE)'} · GOF ${d.gofAvailable?'가능':'생략됨'}</div>
       <div class="table-wrap"><table><thead><tr><th>항</th><th>Estimate</th><th>SE</th><th>p-value</th><th>Odds Ratio</th></tr></thead><tbody>${coefRows||'<tr><td colspan="5">계수 없음</td></tr>'}</tbody></table></div>
+      ${effectRows?`<h4 style="margin-top:12px">실질적 효과 크기(확률 환산, 근사치)</h4><div class="table-wrap"><table><thead><tr><th>항</th><th>기준 확률</th><th>1단위 증가 시</th><th>변화</th></tr></thead><tbody>${effectRows}</tbody></table></div>`:''}
       <h4 style="margin-top:12px">GOF 원본 출력</h4><pre>${(d.gofText||[]).join('\n')||'(GOF 출력 없음)'}</pre>
       ${d.mcmcDiagnosticsNote?`<h4>MCMC 진단 참고</h4><p style="color:#91a7be">${d.mcmcDiagnosticsNote}</p>`:''}
     `;
@@ -193,9 +195,51 @@ function draw(data,canvasId){
   for(const n of nodes){const p=pos.get(n.id),d=degree.get(n.id)||0,r=n.isolate?2.2:Math.min(7,2.7+Math.sqrt(d)*.18);ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fillStyle=n.isolate?'#53677d':graphColor(n.group);ctx.fill();if(top.has(n.id)){ctx.font='10px sans-serif';ctx.fillStyle='#eaf2ff';ctx.textAlign='left';ctx.fillText(n.id,p.x+r+2,p.y+3)}}
   ctx.fillStyle='#91a7be';ctx.font='12px sans-serif';ctx.textAlign='left';ctx.fillText(`노드 ${nodes.length} · 엣지 ${links.length} · 고립 노드 ${data?.meta?.isolateCount??nodes.filter(n=>n.isolate).length}`,12,20);
 }
+function exportCanvasPNG(canvasId,filename){
+  const canvas=document.getElementById(canvasId);if(!canvas)return alert('그래프를 먼저 생성하세요');
+  const a=document.createElement('a');a.href=canvas.toDataURL('image/png');a.download=filename;a.click();
+}
+// v33 제안 #5: draw()와 동일한 원형(대륙연맹별) 레이아웃을 SVG 마크업으로 재구성합니다.
+// 캔버스는 래스터(픽셀)라 확대하면 깨지지만, SVG는 벡터라 논문/포스터에 확대 삽입해도
+// 깨지지 않고, Illustrator/Inkscape에서 색상·라벨을 편집할 수 있습니다.
+function buildNetworkSVG(data,width=1200,height=700){
+  const nodes=Array.isArray(data?.nodes)?data.nodes:[],links=Array.isArray(data?.links)?data.links:[];
+  if(!nodes.length)return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#091727"/><text x="50%" y="50%" fill="#91a7be" font-size="16" text-anchor="middle">표시할 네트워크 데이터가 없습니다.</text></svg>`;
+  const degree=new Map(nodes.map(n=>[n.id,0]));for(const l of links){degree.set(l.source,(degree.get(l.source)||0)+Number(l.value||1));degree.set(l.target,(degree.get(l.target)||0)+Number(l.value||1))}
+  const groups=[...new Set(nodes.map(n=>n.group||'UNK'))].sort(),byGroup=new Map(groups.map(g=>[g,nodes.filter(n=>(n.group||'UNK')===g)]));
+  const pos=new Map(),cx=width/2,cy=height/2,R=Math.max(90,Math.min(width,height)*.39);
+  groups.forEach((g,gi)=>{const arr=byGroup.get(g)||[],base=2*Math.PI*gi/groups.length-Math.PI/2,spread=Math.min(1.15,Math.PI*2/groups.length*.8);arr.forEach((n,i)=>{const off=arr.length===1?0:(i/(arr.length-1)-.5)*spread,rank=(i%3),r=R-rank*22;pos.set(n.id,{x:cx+Math.cos(base+off)*r,y:cy+Math.sin(base+off)*r})})});
+  const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let edgesSvg='';
+  for(const l of links){const a=pos.get(l.source),b=pos.get(l.target);if(!a||!b)continue;edgesSvg+=`<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="#74a9d8" stroke-opacity="0.22" stroke-width="0.7"/>`}
+  const top=new Set([...nodes].sort((a,b)=>(degree.get(b.id)||0)-(degree.get(a.id)||0)).slice(0,12).map(n=>n.id));
+  let nodesSvg='';
+  for(const n of nodes){const p=pos.get(n.id);if(!p)continue;const d=degree.get(n.id)||0,r=n.isolate?2.2:Math.min(7,2.7+Math.sqrt(d)*.18),color=n.isolate?'#53677d':graphColor(n.group);
+    nodesSvg+=`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r.toFixed(1)}" fill="${color}"/>`;
+    if(top.has(n.id))nodesSvg+=`<text x="${(p.x+r+2).toFixed(1)}" y="${(p.y+3).toFixed(1)}" font-size="10" font-family="sans-serif" fill="#eaf2ff">${esc(n.id)}</text>`;
+  }
+  const legend=groups.map((g,i)=>`<circle cx="14" cy="${34+i*18}" r="5" fill="${graphColor(g)}"/><text x="26" y="${38+i*18}" font-size="11" font-family="sans-serif" fill="#cdd9e6">${esc(g)}</text>`).join('');
+  const caption=`노드 ${nodes.length} · 엣지 ${links.length} · 고립 노드 ${data?.meta?.isolateCount??nodes.filter(n=>n.isolate).length}${data?.meta?.from?` · ${esc(data.meta.from)} ~ ${esc(data.meta.to)}`:''}`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <rect width="100%" height="100%" fill="#091727"/>
+  <g>${edgesSvg}</g>
+  <g>${nodesSvg}</g>
+  <g>${legend}</g>
+  <text x="12" y="20" font-size="12" font-family="sans-serif" fill="#91a7be">${esc(caption)}</text>
+</svg>`;
+}
+function exportNetworkSVG(data,filename){
+  if(!data||!Array.isArray(data.nodes)||!data.nodes.length)return alert('그래프를 먼저 생성하세요');
+  const svg=buildNetworkSVG(data,1200,700);
+  triggerBlobDownload(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}),filename);
+}
+$('#exportPngBtn1').onclick=()=>exportCanvasPNG('networkCanvas','fifa-network-dashboard.png');
+$('#exportSvgBtn1').onclick=()=>exportNetworkSVG(window.__lastHomeNetwork,'fifa-network-dashboard.svg');
+$('#exportPngBtn2').onclick=()=>exportCanvasPNG('networkCanvas2','fifa-network-explorer.png');
+$('#exportSvgBtn2').onclick=()=>exportNetworkSVG(window.__lastExplorerNetwork,'fifa-network-explorer.svg');
 async function drawExplorer(){
-  const from=$('#from').value,to=$('#to').value,type=$('#networkType').value;const btn=$('#drawBtn');btn.disabled=true;btn.textContent='생성 중...';
-  try{const d=await api(`/api/network?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&type=${encodeURIComponent(type)}`);window.__lastExplorerNetwork=d;draw(d,'networkCanvas2');$('#netStats').innerHTML=`노드 <b>${d.nodes.length}</b> · 엣지 <b>${d.links.length}</b> · 원자료 경기 <b>${d.meta.matches}</b> · 고립 노드 <b>${d.meta.isolateCount||0}</b>`}catch(e){$('#netStats').textContent=e.message}finally{btn.disabled=false;btn.textContent='그래프 생성'}
+  const from=$('#from').value,to=$('#to').value,type=$('#networkType').value,matchType=$('#matchTypeFilter')?.value||'all';const btn=$('#drawBtn');btn.disabled=true;btn.textContent='생성 중...';
+  try{const d=await api(`/api/network?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&type=${encodeURIComponent(type)}&matchType=${encodeURIComponent(matchType)}`);window.__lastExplorerNetwork=d;draw(d,'networkCanvas2');$('#netStats').innerHTML=`노드 <b>${d.nodes.length}</b> · 엣지 <b>${d.links.length}</b> · 원자료 경기 <b>${d.meta.matches}</b> · 고립 노드 <b>${d.meta.isolateCount||0}</b>`}catch(e){$('#netStats').textContent=e.message}finally{btn.disabled=false;btn.textContent='그래프 생성'}
 }
 $('#drawBtn').onclick=drawExplorer;
 window.addEventListener('resize',()=>{
@@ -216,7 +260,37 @@ window.addEventListener('resize',()=>{
 
 document.addEventListener('DOMContentLoaded',()=>{init();setTimeout(autoGithubDiagnostic,300)});
 
-async function loadAnalytics(){try{const d=await api(`/api/analytics?type=${$('#analyticsType')?.value||'win'}`);renderAnalytics(d)}catch(e){if($('#modelComparison'))$('#modelComparison').textContent=e.message}}
+async function loadAnalytics(){try{const d=await api(`/api/analytics?type=${$('#analyticsType')?.value||'win'}&matchType=${$('#analyticsMatchType')?.value||'all'}`);renderAnalytics(d)}catch(e){if($('#modelComparison'))$('#modelComparison').textContent=e.message}}
+$('#nullModelBtn').onclick=async()=>{
+  const type=$('#analyticsType').value,matchType=$('#analyticsMatchType').value;
+  $('#nullModelResult').innerHTML='계산 중...';
+  try{
+    const d=await api(`/api/null-model?type=${type}&matchType=${matchType}`);
+    if(!d.ok){$('#nullModelResult').textContent=d.error||'실패했습니다.';return}
+    $('#nullModelResult').innerHTML=`
+      <div class="table-wrap"><table><thead><tr><th>지표</th><th>실제 관측</th><th>ER 무작위 기대값</th><th>비율(관측/기대)</th></tr></thead><tbody>
+        <tr><td>군집계수(clustering)</td><td>${d.observed.clustering}</td><td>${d.erNullModel.clustering}</td><td>${d.clusteringRatio??'-'}</td></tr>
+        <tr><td>차수 분산</td><td>${d.observed.degreeVariance}</td><td>${d.erNullModel.degreeVariance}</td><td>${d.degreeVarianceRatio??'-'}</td></tr>
+      </tbody></table></div>
+      <p style="margin-top:8px">노드 ${d.n}개 · 엣지 ${d.m}개 · 밀도 ${d.density}</p>
+      <p style="color:#91a7be">${d.interpretation}</p>
+    `;
+  }catch(e){$('#nullModelResult').textContent=e.message}
+};
+$('#confedBtn').onclick=async()=>{
+  const type=$('#analyticsType').value,matchType=$('#analyticsMatchType').value;
+  $('#confedResult').innerHTML='계산 중...';
+  try{
+    const d=await api(`/api/confederation-breakdown?type=${type}&matchType=${matchType}`);
+    if(!d.ok){$('#confedResult').textContent=d.error||'실패했습니다.';return}
+    const rows=d.confederations.map(c=>`<tr><td>${c.confederation}</td><td>${c.nodeCount}</td><td>${c.withinEdgeCount}</td><td>${c.density}</td><td>${c.averageDegree}</td></tr>`).join('');
+    $('#confedResult').innerHTML=`
+      <div class="table-wrap"><table><thead><tr><th>연맹</th><th>국가 수</th><th>연맹 내 엣지</th><th>밀도</th><th>평균 연결</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p style="margin-top:8px">연맹 내부 연결 비율(withinShare): <b>${(d.homophily.withinShare*100).toFixed(1)}%</b> (연맹 내 ${d.homophily.withinEdges} / 연맹 간 ${d.homophily.crossEdges})</p>
+      <p style="color:#91a7be">${d.note}</p>
+    `;
+  }catch(e){$('#confedResult').textContent=e.message}
+};
 function renderAnalytics(d){if(!$('#analyticsCards'))return;$('#analyticsCards').innerHTML=card('노드',d.meta.nodeCount)+card('엣지',d.meta.edgeCount)+card('커뮤니티',d.meta.communities)+card('분석유형',d.meta.type);const body=$('#centralityTable tbody');body.innerHTML=(d.top||[]).map((x,i)=>`<tr><td>${i+1}</td><td><b>${x.name}</b><small>${x.code}</small></td><td>${x.confederation}</td><td>${x.totalDegree}</td><td>${x.pageRank}</td><td>${x.community}</td></tr>`).join('');$('#confederationSummary').innerHTML=(d.confederations||[]).sort((a,b)=>b.averageDegree-a.averageDegree).map(x=>`<div class="rank-row"><b>${x.name}</b><span>${x.nodes}개국 · 평균 Degree ${x.averageDegree}</span></div>`).join('')}
 $('#analyticsBtn').onclick=loadAnalytics;
 $('#comparisonBtn').onclick=async()=>{try{const d=await api('/api/model-comparison');const best=d.best?`<p class="good"><b>최적 AIC 모형 #${d.best.id}</b> · AIC ${d.best.aic} · ${d.best.usedFormula}</p>`:'<p>완료된 비교 가능 모형이 없습니다.</p>';$('#modelComparison').innerHTML=best+`<div class="table-wrap"><table><thead><tr><th>ID</th><th>모형</th><th>상태</th><th>AIC</th><th>BIC</th><th>수렴</th><th>실제 식</th></tr></thead><tbody>${(d.rows||[]).map(x=>`<tr><td>#${x.id}</td><td>${x.name}</td><td>${x.status}</td><td>${x.aic??'-'}</td><td>${x.bic??'-'}</td><td>${x.converged?'예':'아니오'}</td><td><code>${x.usedFormula||x.formula}</code></td></tr>`).join('')}</tbody></table></div>`}catch(e){$('#modelComparison').textContent=e.message}};
