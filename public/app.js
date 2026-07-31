@@ -46,10 +46,11 @@ $('#interpretLatest').onclick=async()=>{
   $('#paperInsight').innerHTML='<span class="warn">Cloudflare Workers AI로 최신 모형을 해설하는 중입니다... (몇 초 정도 걸릴 수 있습니다)</span>';
   try{
     const d=await api('/api/interpret');
-    const badge=d.aiGenerated?`<span class="good">● AI 생성(${d.aiModel||'Workers AI'})</span>`:`<span class="warn">● 기본 요약(AI 미사용${d.aiError?': '+d.aiError:''})</span>`;
+    const badge=d.aiGenerated?`<span class="good">● AI 생성(${d.aiModel||'Workers AI'})</span>`:`<span class="warn">● 기본 요약(AI 미사용)</span>`;
+    const errNote=d.aiError?`<p style="color:#e0a23a;font-size:12px;word-break:break-word">${d.aiError}</p>`:'';
     const runNote=d.runId?`<div style="margin-bottom:4px;color:#91a7be;font-size:12px">완료된 실행번호 #${d.runId} 기준</div>`:'';
     const notes=(d.coefficientNotes||[]).map((x)=>`<li>${x}</li>`).join('');
-    $('#paperInsight').innerHTML=`${runNote}<div style="margin-bottom:8px">${badge}</div><b>${d.headline||''}</b><p>${d.summary||''}</p>${notes?`<h4>계수 해석</h4><ul>${notes}</ul>`:''}<h4>주의사항</h4><ul>${(d.cautions||[]).map(x=>`<li>${x}</li>`).join('')}</ul>`;
+    $('#paperInsight').innerHTML=`${runNote}<div style="margin-bottom:4px">${badge}</div>${errNote}<b>${d.headline||''}</b><p>${d.summary||''}</p>${notes?`<h4>계수 해석</h4><ul>${notes}</ul>`:''}<h4>주의사항</h4><ul>${(d.cautions||[]).map(x=>`<li>${x}</li>`).join('')}</ul>`;
   }catch(e){$('#paperInsight').textContent=e.message}
   finally{btn.disabled=false;btn.textContent=orig}
 };
