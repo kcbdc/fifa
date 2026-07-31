@@ -1,11 +1,24 @@
-name: ERGM and TERGM Analysis
+name: ERGM and TERGM Analysis (fast, container-based)
 
-# v29: 정적 ERGM과 시간적 TERGM을 같은 job 안에서 순서대로(직렬) 돌리던 걸,
-# 서로 독립적인 두 개의 병렬 job으로 나눴습니다. 둘 다 report-run에만 의존하고
-# 서로에게는 의존하지 않으므로 GitHub Actions가 동시에 실행합니다.
-# "정적+시간적 모두" 모드의 총 소요시간이 대략 (ergm 소요시간 + tergm 소요시간)에서
-# max(ergm 소요시간, tergm 소요시간)로 줄어듭니다(공유 R 환경설정 비용은 각자 한 번씩
-# 부담하지만, 그마저도 actions/cache 캐시 적중 시 짧습니다).
+# v30: analyze.yml의 대안 버전입니다. build-r-image.yml로 미리 빌드해둔
+# ghcr.io/.../fifa-r-env 이미지를 사용해서 "R 설정"과 "R 패키지 설치" 두 스텝을
+# 통째로 생략합니다 — 이미지에 이미 다 설치돼 있기 때문입니다.
+#
+# ⚠️ 사용 전 필수: Actions 탭에서 "Build R environment image"를 먼저 한 번 수동
+# 실행해서 이미지가 ghcr.io에 실제로 존재해야 이 워크플로가 동작합니다.
+# 이미지가 없는 상태로 이 워크플로를 트리거하면 컨테이너를 pull하지 못해 즉시 실패합니다.
+#
+# 검증 방법:
+#   1) Actions → Build R environment image → Run workflow (완료까지 대기)
+#   2) 이 파일 이름을 analyze.yml로 바꿔치기(기존 analyze.yml은 백업해두고 교체)
+#      하거나, Cloudflare Worker의 GITHUB_WORKFLOW_FILE 값을
+#      "analyze-fast.yml"로 바꿔서 이 워크플로가 대신 트리거되도록 설정
+#   3) [ERGM] 탭에서 "정적 ERGM만(빠름)"으로 한 번 테스트 실행해 정상 완료되는지 확인
+#   4) 문제없으면 "정적+시간적 모두"로도 확인
+#
+# 검증 전까지는 기존 analyze.yml이 계속 기본으로 사용되며 이 파일은 아무 영향도 주지
+# 않습니다(파일이 저장소에 있어도 GITHUB_WORKFLOW_FILE이 이 파일명을 가리키지 않으면
+# repository_dispatch/workflow_dispatch 트리거 대상이 되지 않습니다).
 
 on:
   workflow_dispatch:
@@ -28,6 +41,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   report-run:
@@ -65,6 +79,11 @@ jobs:
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/fifa-r-env:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     env:
       RUN_ID: ${{ github.event.client_payload.run_id || inputs.run_id }}
       API_BASE_URL: ${{ secrets.API_BASE_URL }}
@@ -73,28 +92,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup R
-        uses: r-lib/actions/setup-r@v2
-        with:
-          use-public-rspm: true
-
-      - name: Install and cache R dependencies
-        uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          packages: |
-            any::jsonlite
-            any::httr2
-            any::network
-            any::ergm
-            any::sna
-            any::tergm
-            any::networkDynamic
-            any::tsna
-            any::btergm
-            any::coda
-            any::texreg
-            any::igraph
-          cache-version: 14
+      # "Setup R"과 "Install and cache R dependencies" 스텝이 통째로 사라졌습니다 —
+      # 컨테이너 이미지에 이미 R과 모든 패키지가 설치돼 있습니다.
 
       - name: Run static ERGM
         run: Rscript r-analysis/run_ergm.R "$RUN_ID"
@@ -116,6 +115,11 @@ jobs:
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/fifa-r-env:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     env:
       RUN_ID: ${{ github.event.client_payload.run_id || inputs.run_id }}
       API_BASE_URL: ${{ secrets.API_BASE_URL }}
@@ -123,29 +127,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup R
-        uses: r-lib/actions/setup-r@v2
-        with:
-          use-public-rspm: true
-
-      - name: Install and cache R dependencies
-        uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          packages: |
-            any::jsonlite
-            any::httr2
-            any::network
-            any::ergm
-            any::sna
-            any::tergm
-            any::networkDynamic
-            any::tsna
-            any::btergm
-            any::coda
-            any::texreg
-            any::igraph
-          cache-version: 14
 
       - name: Run temporal ERGM
         continue-on-error: true
@@ -178,6 +159,7 @@ jobs:
             "repository": "${{ github.repository }}",
             "commit": "${{ github.sha }}",
             "workflow_run": "${{ github.run_id }}",
+            "image": "ghcr.io/${{ github.repository_owner }}/fifa-r-env:latest",
             "static_ergm_result": "${{ needs.static-ergm.result }}",
             "temporal_tergm_result": "${{ needs.temporal-tergm.result }}",
             "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

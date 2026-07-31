@@ -1,0 +1,66 @@
+name: Build R environment image
+
+# Dockerfile.r-env을 빌드해서 GitHub Container Registry(ghcr.io)에 올립니다.
+#
+# v31: 세 가지 방식으로 트리거됩니다.
+#   1) 수동 실행 (Actions 탭 → Run workflow) — 최초 빌드나 즉시 확인용
+#   2) Dockerfile.r-env가 바뀌어 main에 push될 때 자동 실행 — 패키지 목록을
+#      고치고 나서 재빌드를 깜빡하는 걸 원천적으로 방지합니다.
+#   3) 매주 월요일 자동 실행(스케줄) — Dockerfile을 안 건드려도 CRAN 쪽에서
+#      ergm/tergm 등의 새 버전이나 보안 패치가 나오면 그걸 반영해 정기적으로
+#      다시 빌드합니다. 오래된 버전으로 계속 분석하게 되는 걸 막기 위함입니다.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile.r-env'
+      - '.github/workflows/build-r-image.yml'
+  schedule:
+    - cron: '0 18 * * 0' # 매주 월요일 03:00 KST(=UTC 일요일 18:00)에 자동 재빌드
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.r-env
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fifa-r-env:latest
+            ghcr.io/${{ github.repository_owner }}/fifa-r-env:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### 이미지 빌드 완료" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/${{ github.repository_owner }}/fifa-r-env:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "저장소 Settings → Packages 에서 이 이미지의 가시성(visibility)이 " >> "$GITHUB_STEP_SUMMARY"
+          echo "Public이 아니라면, analyze-fast.yml이 이미지를 pull할 때 권한 문제가 " >> "$GITHUB_STEP_SUMMARY"
+          echo "없는지 확인하십시오(같은 저장소의 GITHUB_TOKEN은 기본적으로 read 권한을 가집니다)." >> "$GITHUB_STEP_SUMMARY"
