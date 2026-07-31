@@ -1,0 +1,34 @@
+# fifa-r-env: ERGM/TERGM 분석에 필요한 R 패키지를 미리 설치해둔 이미지.
+#
+# rocker/r-ver 이미지는 amd64에서 기본 CRAN 미러로 Posit Public Package Manager(RSPM/P3M)를
+# 이미 사용하도록 설정돼 있어서, install.packages()가 자동으로 컴파일된 바이너리 패키지를
+# 받아옵니다(별도 repos 설정 불필요) — GitHub Actions의 ubuntu-latest 러너와 같은 계열의
+# 리눅스라 바이너리 호환성도 맞습니다.
+#
+# 빌드: .github/workflows/build-r-image.yml (workflow_dispatch로 수동 실행)
+# 사용: .github/workflows/analyze-fast.yml (analyze.yml 검증 후 교체용 대안 워크플로)
+FROM rocker/r-ver:4
+
+# httr2/curl 등이 런타임에 필요로 하는 시스템 라이브러리
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libcurl4-openssl-dev \
+      libssl-dev \
+      libxml2-dev \
+      zlib1g-dev \
+      git-core \
+    && rm -rf /var/lib/apt/lists/*
+
+# run_ergm.R / run_tergm.R가 실제로 필요로 하는 패키지 전체
+# (analyze.yml의 "Install and cache R dependencies" 스텝과 동일한 목록으로 유지)
+RUN R -q -e "install.packages(c( \
+      'jsonlite','httr2','network','ergm','sna','tergm', \
+      'networkDynamic','tsna','btergm','coda','texreg','igraph' \
+    ), Ncpus = max(1, parallel::detectCores()))"
+
+# 설치가 실제로 됐는지 빌드 시점에 바로 검증(빌드 실패로 조기에 문제를 드러냄)
+RUN R -q -e "invisible(sapply(c('jsonlite','httr2','network','ergm','sna','tergm', \
+      'networkDynamic','tsna','btergm','coda','texreg','igraph'), \
+      function(p) library(p, character.only = TRUE))); cat('OK: all packages load\n')"
+
+WORKDIR /work
+CMD ["R", "--version"]
