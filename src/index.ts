@@ -387,6 +387,22 @@ function extractJsonObject(text:string):any{
   try{return JSON.parse(match[0])}
   catch(err){throw new Error(`AI가 반환한 JSON을 파싱하지 못했습니다: ${String(err).slice(0,100)}. 원본 조각: "${snippet(match[0])}"`)}
 }
+function extractAiText(res:any):string{
+  if(typeof res==='string')return res;
+  if(res==null)return '';
+  const stringCandidates=[res.response,res.result?.response,res.choices?.[0]?.message?.content,res.output_text,res.result?.output_text,res.generated_text];
+  for(const c of stringCandidates)if(typeof c==='string'&&c.trim())return c;
+  const resp=res.response;
+  if(resp&&typeof resp==='object'){
+    if(typeof resp.content==='string')return resp.content;
+    if(typeof resp.text==='string')return resp.text;
+    if(Array.isArray(resp)){
+      const joined=resp.map((x:any)=>typeof x==='string'?x:(x?.text||x?.content||'')).join('');
+      if(joined.trim())return joined;
+    }
+  }
+  try{return JSON.stringify(res)}catch{return ''}
+}
 async function aiInterpretation(e:Env,model:any){
   const modelId=e.WORKERS_AI_MODEL||DEFAULT_AI_MODEL;
   const prompt=buildInterpretPrompt(model);
@@ -402,7 +418,7 @@ async function aiInterpretation(e:Env,model:any){
   }catch(err){
     throw new Error(`Workers AI 호출 자체가 실패했습니다(모델: ${modelId}): ${String(err).slice(0,180)}`);
   }
-  const raw=String(res?.response??res?.result?.response??(typeof res==='string'?res:JSON.stringify(res??'')));
+  const raw=extractAiText(res);
   if(!raw.trim())throw new Error(`AI가 빈 응답을 반환했습니다(모델: ${modelId}). 원본 응답 구조: ${JSON.stringify(res).slice(0,180)}`);
   const parsed=extractJsonObject(raw);
   if(!parsed.headline||!parsed.summary)throw new Error(`AI 응답 스키마가 불완전합니다(headline/summary 누락). 원본: "${raw.slice(0,180).replace(/\s+/g,' ').trim()}"`);
