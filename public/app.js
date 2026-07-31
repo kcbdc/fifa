@@ -2,6 +2,38 @@ const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 async function api(path,opt){const r=await fetch(path,opt);let d;try{d=await r.json()}catch{d={error:await r.text()}}if(!r.ok)throw new Error(d.error||'요청 실패');return d}
 function show(view){$$('.view').forEach(x=>x.classList.toggle('active',x.id===view));window.scrollTo(0,0);if(view==='home')init();if(view==='model')autoGithubDiagnostic();else if(typeof stopGithubPoll==='function')stopGithubPoll();if(view==='analytics')loadAnalytics()}
 $$('nav button').forEach(b=>b.onclick=()=>show(b.dataset.view));
+
+// v34: 전수 점검 결과 12개 버튼이 클릭해도 즉시 아무 반응이 없어서(응답이 올 때까지
+// 화면이 그대로라) "클릭이 씹혔나?" 오해를 유발하고 있었습니다. 모든 버튼이 공통으로
+// 이 래퍼를 거치도록 정리했습니다.
+//   1) 클릭 즉시 버튼을 비활성화하고 로딩 문구로 바꿉니다 → 반응이 없어 보이는 문제 원천 차단
+//   2) 이미 처리 중이면 재클릭을 무시합니다 → 중복 요청(예: 모형을 여러 번 실행 요청해
+//      GitHub Actions가 중복 실행되는 문제)을 원천 차단
+//   3) 결과 표시 영역이 있으면 그 영역에도 즉시 "처리 중" 문구를 넣습니다
+//   4) 에러가 나면 반드시 화면에 표시됩니다(콘솔에만 찍히고 조용히 사라지지 않음)
+//   5) 성공/실패와 무관하게 버튼은 항상 원래 상태로 복구됩니다
+function withBusy(btn,run,opts={}){
+  const loadingText=opts.loadingText,targetEl=opts.targetEl,loadingHtml=opts.loadingHtml;
+  return async(...args)=>{
+    if(btn&&btn.disabled)return;
+    const origText=btn?btn.textContent:null;
+    if(btn){btn.disabled=true;if(loadingText)btn.textContent=loadingText}
+    if(targetEl&&loadingHtml!==false)targetEl.innerHTML=loadingHtml||'처리 중...';
+    try{
+      await run(...args);
+    }catch(err){
+      const msg=err&&err.message?err.message:String(err);
+      if(targetEl)targetEl.textContent=msg;else alert(msg);
+    }finally{
+      if(btn){btn.disabled=false;if(origText!==null)btn.textContent=origText}
+    }
+  };
+}
+function flashButton(btn,text,ms=1200){
+  if(!btn)return;const orig=btn.textContent;btn.disabled=true;btn.textContent=text;
+  setTimeout(()=>{btn.textContent=orig;btn.disabled=false},ms);
+}
+
 function card(k,v){return `<div class="metric"><span>${k}</span><b>${v??'-'}</b></div>`}
 function setHealth(kind,text,detail=''){const el=$('#health');if(!el)return;const cls=kind==='good'?'good':kind==='warn'?'warn':'bad';el.innerHTML=`<span class="${cls}">● ${text}</span>${detail?`<small>${detail}</small>`:''}`}
 async function loadHealth(){try{const h=await api('/api/health');setHealth('good','정상',`DB 연결 · v${h.version} · ${new Date(h.time).toLocaleString()}`);return h}catch(e){setHealth('bad','연결 오류',e.message);throw e}}
@@ -25,10 +57,25 @@ function renderQuality(q){
   const c=q.counts||{};
   $('#quality').innerHTML=`<div class="quality-summary"><div class="quality-score ${cls}">${q.score}<small>/100</small></div><div><b>${q.grade||''}</b><span>FIFA 회원국 ${c.fifaMembers||0} · 유효 경기 ${(c.memberMatches||0).toLocaleString()} · 최신 랭킹 ${c.latestRankingTeams||0}개국</span></div></div><div class="quality-dimensions">${dims}</div><div class="quality-foot"><span>중복 후보 처리 ${(c.duplicateCandidatesHandled||0).toLocaleString()}건</span><span>비회원 경기 자동 제외 ${(c.excludedNonMemberMatches||0).toLocaleString()}건</span><span>무효 오류 ${(c.invalid||0).toLocaleString()}건</span></div><details><summary>산식과 해석</summary><p>${q.methodology||''}</p><ul>${(q.notes||[]).map(x=>`<li>${x}</li>`).join('')}</ul></details>`
 }
-$('#qualityBtn').onclick=async()=>{const q=await api('/api/quality');renderQuality(q);$('#log').textContent=JSON.stringify(q,null,2)};
-$('#providerTestBtn').onclick=async()=>{try{$('#log').textContent='API 연결 진단 중...';const d=await api('/api/provider/test');$('#log').textContent=JSON.stringify(d,null,2);const ok=(d.results||[]).filter(x=>x.ok).length,total=(d.results||[]).length;setHealth(d.ok?'good':'warn',d.ok?'정상':'부분 정상',`외부 데이터 소스 ${ok}/${total} 연결`)}catch(e){$('#log').textContent=e.message}};
+$('#qualityBtn').onclick=withBusy($('#qualityBtn'),async()=>{
+  const q=await api('/api/quality');renderQuality(q);$('#log').textContent=JSON.stringify(q,null,2);
+},{loadingText:'검사 중...',targetEl:$('#quality'),loadingHtml:'<p>품질 검사를 실행하는 중입니다...</p>'});
+$('#providerTestBtn').onclick=withBusy($('#providerTestBtn'),async()=>{
+  const d=await api('/api/provider/test');$('#log').textContent=JSON.stringify(d,null,2);
+  const ok=(d.results||[]).filter(x=>x.ok).length,total=(d.results||[]).length;
+  setHealth(d.ok?'good':'warn',d.ok?'정상':'부분 정상',`외부 데이터 소스 ${ok}/${total} 연결`);
+},{loadingText:'진단 중...',targetEl:$('#log'),loadingHtml:'API 연결 진단 중...'});
 function renderProgress(p){if(!p)return;$('#progressBar').style.width=`${p.percent}%`;$('#progressText').textContent=`${p.completed} / ${p.total} (${p.percent}%)`;$('#nextTask').textContent=p.finished?'수집 완료':`다음 작업: ${p.next?.label||'-'} · 남은 배치 ${p.remaining}개`;}
-$('#collectBtn').onclick=async()=>{try{$('#log').textContent='다음 배치 수집 중...';const d=await api('/api/collect',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});$('#log').textContent=JSON.stringify(d,null,2);renderProgress(d.progress);await init()}catch(e){$('#log').textContent=e.message}};$('#resetCollectBtn').onclick=async()=>{if(!confirm('진행 커서를 처음으로 되돌릴까요? 이미 저장된 데이터는 삭제되지 않습니다.'))return;try{const d=await api('/api/collect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({reset:true})});$('#log').textContent=JSON.stringify(d,null,2);renderProgress(d.progress)}catch(e){$('#log').textContent=e.message}};
+$('#collectBtn').onclick=withBusy($('#collectBtn'),async()=>{
+  const d=await api('/api/collect',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+  $('#log').textContent=JSON.stringify(d,null,2);renderProgress(d.progress);await init();
+},{loadingText:'수집 중...',targetEl:$('#log'),loadingHtml:'다음 배치 수집 중...'});
+const doResetCollect=withBusy($('#resetCollectBtn'),async()=>{
+  const d=await api('/api/collect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({reset:true})});
+  $('#log').textContent=JSON.stringify(d,null,2);renderProgress(d.progress);
+},{loadingText:'재설정 중...',targetEl:$('#log'),loadingHtml:'진행 커서를 초기화하는 중...'});
+$('#resetCollectBtn').onclick=()=>{if(confirm('진행 커서를 처음으로 되돌릴까요? 이미 저장된 데이터는 삭제되지 않습니다.'))doResetCollect()};
+
 function triggerBlobDownload(blob,name){
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
@@ -39,10 +86,22 @@ function triggerBlobDownload(blob,name){
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
 }
 function download(name,obj){triggerBlobDownload(new Blob([JSON.stringify(obj,null,2)],{type:'application/json'}),name)}
-$('#exportBtn').onclick=$('#paperExport').onclick=async()=>download('fifa-network-research-data.json',await api('/api/export'));
-$('#reproExport').onclick=async()=>download('fifa-network-reproducibility-v13.json',await api('/api/reproducibility'));
+async function downloadUrl(url,name){
+  try{
+    const res=await fetch(url);
+    if(!res.ok){
+      let msg=`다운로드 실패(HTTP ${res.status})`;
+      try{const t=await res.clone().json();if(t.error)msg=t.error}catch{}
+      throw new Error(msg)
+    }
+    triggerBlobDownload(await res.blob(),name)
+  }catch(e){alert(`파일을 받아오지 못했습니다: ${e.message}`)}
+}
+$('#exportBtn').onclick=$('#paperExport').onclick=withBusy($('#exportBtn'),async()=>download('fifa-network-research-data.json',await api('/api/export')),{loadingText:'내보내는 중...'});
+$('#reproExport').onclick=withBusy($('#reproExport'),async()=>download('fifa-network-reproducibility-v13.json',await api('/api/reproducibility')),{loadingText:'내보내는 중...'});
 $('#interpretLatest').onclick=async()=>{
-  const btn=$('#interpretLatest'),orig=btn.textContent;btn.disabled=true;btn.textContent='AI 분석 중...';
+  const btn=$('#interpretLatest');if(btn.disabled)return;
+  const orig=btn.textContent;btn.disabled=true;btn.textContent='AI 분석 중...';
   $('#paperInsight').innerHTML='<span class="warn">Cloudflare Workers AI로 최신 모형을 해설하는 중입니다... (몇 초 정도 걸릴 수 있습니다)</span>';
   try{
     const d=await api('/api/interpret');
@@ -54,30 +113,30 @@ $('#interpretLatest').onclick=async()=>{
   }catch(e){$('#paperInsight').textContent=e.message}
   finally{btn.disabled=false;btn.textContent=orig}
 };
-$('#gofViewBtn').onclick=async()=>{
-  const id=$('#gofRunId').value;if(!id)return alert('실행번호를 입력하세요');
-  $('#gofReportBox').innerHTML='불러오는 중...';
-  try{
-    const d=await api(`/api/gof-report?id=${id}`);
-    if(!d.ok){$('#gofReportBox').textContent=d.error||'리포트를 생성할 수 없습니다.';return}
-    if(d.note){$('#gofReportBox').textContent=d.note;return}
-    const coefRows=(d.coefficients||[]).map(c=>`<tr><td>${c.term}</td><td>${Number(c.estimate).toFixed(4)}</td><td>${Number(c.std_error).toFixed(4)}</td><td>${Number(c.p_value).toFixed(4)}</td><td>${Number(c.odds_ratio).toFixed(3)}</td></tr>`).join('');
-    const effectRows=(d.effectSizes||[]).filter(x=>x.deltaPercentagePoints!==undefined).map(x=>`<tr><td>${x.term}</td><td>${x.baselineProbability}%</td><td>${x.newProbability}%</td><td style="color:${x.deltaPercentagePoints>=0?'#5fd58e':'#e0715f'}">${x.deltaPercentagePoints>=0?'+':''}${x.deltaPercentagePoints}%p</td></tr>`).join('');
-    $('#gofReportBox').innerHTML=`
-      <div style="margin-bottom:8px"><b>${d.modelName||''}</b> · ${d.networkType==='win'?'승리 네트워크':'경기 네트워크'} · 실행번호 #${d.runId}</div>
-      <div style="margin-bottom:8px">공식: <code>${d.formula||'-'}</code>${d.fallbackUsed?' <span class="warn">(자동 단순화됨)</span>':''}</div>
-      <div style="margin-bottom:8px">AIC ${d.aic??'-'} · BIC ${d.bic??'-'} · 수렴 ${d.converged?'예':'확인 필요'} · MCMC 사용 ${d.mcmcUsed?'예':'아니오(MPLE)'} · GOF ${d.gofAvailable?'가능':'생략됨'}</div>
-      <div class="table-wrap"><table><thead><tr><th>항</th><th>Estimate</th><th>SE</th><th>p-value</th><th>Odds Ratio</th></tr></thead><tbody>${coefRows||'<tr><td colspan="5">계수 없음</td></tr>'}</tbody></table></div>
-      ${effectRows?`<h4 style="margin-top:12px">실질적 효과 크기(확률 환산, 근사치)</h4><div class="table-wrap"><table><thead><tr><th>항</th><th>기준 확률</th><th>1단위 증가 시</th><th>변화</th></tr></thead><tbody>${effectRows}</tbody></table></div>`:''}
-      <h4 style="margin-top:12px">GOF 원본 출력</h4><pre>${(d.gofText||[]).join('\n')||'(GOF 출력 없음)'}</pre>
-      ${d.mcmcDiagnosticsNote?`<h4>MCMC 진단 참고</h4><p style="color:#91a7be">${d.mcmcDiagnosticsNote}</p>`:''}
-    `;
-  }catch(e){$('#gofReportBox').textContent=e.message}
-};
-$('#gofExportBtn').onclick=()=>{
-  const id=$('#gofRunId').value;if(!id)return alert('실행번호를 입력하세요');
-  downloadUrl(`/api/gof-report/export?id=${id}`,`gof-report-run-${id}.md`);
-};
+const doGofView=withBusy($('#gofViewBtn'),async()=>{
+  const id=$('#gofRunId').value;
+  const d=await api(`/api/gof-report?id=${id}`);
+  if(!d.ok){$('#gofReportBox').textContent=d.error||'리포트를 생성할 수 없습니다.';return}
+  if(d.note){$('#gofReportBox').textContent=d.note;return}
+  const coefRows=(d.coefficients||[]).map(c=>`<tr><td>${c.term}</td><td>${Number(c.estimate).toFixed(4)}</td><td>${Number(c.std_error).toFixed(4)}</td><td>${Number(c.p_value).toFixed(4)}</td><td>${Number(c.odds_ratio).toFixed(3)}</td></tr>`).join('');
+  const effectRows=(d.effectSizes||[]).filter(x=>x.deltaPercentagePoints!==undefined).map(x=>`<tr><td>${x.term}</td><td>${x.baselineProbability}%</td><td>${x.newProbability}%</td><td style="color:${x.deltaPercentagePoints>=0?'#5fd58e':'#e0715f'}">${x.deltaPercentagePoints>=0?'+':''}${x.deltaPercentagePoints}%p</td></tr>`).join('');
+  $('#gofReportBox').innerHTML=`
+    <div style="margin-bottom:8px"><b>${d.modelName||''}</b> · ${d.networkType==='win'?'승리 네트워크':'경기 네트워크'} · 실행번호 #${d.runId}</div>
+    <div style="margin-bottom:8px">공식: <code>${d.formula||'-'}</code>${d.fallbackUsed?' <span class="warn">(자동 단순화됨)</span>':''}</div>
+    <div style="margin-bottom:8px">AIC ${d.aic??'-'} · BIC ${d.bic??'-'} · 수렴 ${d.converged?'예':'확인 필요'} · MCMC 사용 ${d.mcmcUsed?'예':'아니오(MPLE)'} · GOF ${d.gofAvailable?'가능':'생략됨'}</div>
+    <div class="table-wrap"><table><thead><tr><th>항</th><th>Estimate</th><th>SE</th><th>p-value</th><th>Odds Ratio</th></tr></thead><tbody>${coefRows||'<tr><td colspan="5">계수 없음</td></tr>'}</tbody></table></div>
+    ${effectRows?`<h4 style="margin-top:12px">실질적 효과 크기(확률 환산, 근사치)</h4><div class="table-wrap"><table><thead><tr><th>항</th><th>기준 확률</th><th>1단위 증가 시</th><th>변화</th></tr></thead><tbody>${effectRows}</tbody></table></div>`:''}
+    <h4 style="margin-top:12px">GOF 원본 출력</h4><pre>${(d.gofText||[]).join('\n')||'(GOF 출력 없음)'}</pre>
+    ${d.mcmcDiagnosticsNote?`<h4>MCMC 진단 참고</h4><p style="color:#91a7be">${d.mcmcDiagnosticsNote}</p>`:''}
+  `;
+},{loadingText:'조회 중...',targetEl:$('#gofReportBox'),loadingHtml:'불러오는 중...'});
+$('#gofViewBtn').onclick=()=>{if(!$('#gofRunId').value)return alert('실행번호를 입력하세요');doGofView()};
+const doGofExport=withBusy($('#gofExportBtn'),async()=>{
+  const id=$('#gofRunId').value;
+  await downloadUrl(`/api/gof-report/export?id=${id}`,`gof-report-run-${id}.md`);
+},{loadingText:'내보내는 중...'});
+$('#gofExportBtn').onclick=()=>{if(!$('#gofRunId').value)return alert('실행번호를 입력하세요');doGofExport()};
+
 function uploadWithProgress(path,payload,onProgress){
   return new Promise((resolve,reject)=>{
     const xhr=new XMLHttpRequest();
@@ -100,8 +159,9 @@ function setImportProgress(pct,label){
   $('#importProgressText').textContent=label||`${pct}%`;
 }
 $('#importBtn').onclick=async()=>{
+  const btn=$('#importBtn');if(btn.disabled)return;
   const f=$('#fileInput').files[0];if(!f)return alert('파일을 선택하세요');
-  const btn=$('#importBtn'),orig=btn.textContent;btn.disabled=true;btn.textContent='가져오는 중...';$('#log').textContent='업로드 처리 중...';
+  const orig=btn.textContent;btn.disabled=true;btn.textContent='가져오는 중...';$('#log').textContent='업로드 처리 중...';
   setImportProgress(0,'파일 읽는 중...');
   try{
     let rows;
@@ -129,19 +189,22 @@ $('#importBtn').onclick=async()=>{
   }catch(e){$('#log').textContent=`업로드 실패: ${e.message}`;setImportProgress(0,'실패')}
   finally{btn.disabled=false;btn.textContent=orig;setTimeout(()=>{const w=$('#importProgressWrap');if(w)w.style.display='none'},4000)}
 };
-$('#normalizeBtn').onclick=async()=>{
-  const btn=$('#normalizeBtn'),orig=btn.textContent;btn.disabled=true;btn.textContent='정규화 중...';$('#log').textContent='FIFA 211 정규화 실행 중...';
-  try{const d=await api('/api/fifa-normalize',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});$('#log').textContent=JSON.stringify(d,null,2);await init()}
-  catch(e){$('#log').textContent=`정규화 실패: ${e.message}`}
-  finally{btn.disabled=false;btn.textContent=orig}
-};
+$('#normalizeBtn').onclick=withBusy($('#normalizeBtn'),async()=>{
+  $('#log').textContent='FIFA 211 정규화 실행 중...';
+  const d=await api('/api/fifa-normalize',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+  $('#log').textContent=JSON.stringify(d,null,2);await init();
+},{loadingText:'정규화 중...'});
+
 function formula(){const terms=$$('.term:checked').map(x=>x.value);const f=`network ~ ${terms.join(' + ')||'edges'}`;$('#formula').textContent=f;return f}$$('.term').forEach(x=>x.onchange=formula);formula();
 
-
 function renderGithubDiag(d){const checks=(d.checks||[]).map(x=>`<li><b>${x.name}</b> · HTTP ${x.status??'-'} · <span class="${x.ok?'good':'bad'}">${x.ok?'정상':'실패'}</span>${x.message?` · ${x.message}`:''}</li>`).join('');$('#githubDiagResult').innerHTML=`<b class="${d.ok?'good':'bad'}">${d.ok?'GitHub 연결 정상':'GitHub 연결 점검 필요'}</b><p>대상 저장소: <code>${d.owner||'-'}/${d.repo||'-'}</code> · 워크플로: <code>${d.workflow||'-'}</code> · 방식: <code>${d.dispatchMode||'-'}</code></p><ul>${checks}</ul><small>${d.recommendation||''}</small>`}
-$('#githubDiagBtn').onclick=async()=>{try{$('#githubDiagResult').textContent='GitHub 저장소·워크플로·토큰 접근권한을 확인 중입니다...';const d=await api('/api/github/diagnostics');renderGithubDiag(d);$('#modelDetail').textContent=JSON.stringify(d,null,2)}catch(e){$('#githubDiagResult').innerHTML=`<b class="bad">진단 실패</b><p>${e.message}</p>`}};
+$('#githubDiagBtn').onclick=withBusy($('#githubDiagBtn'),async()=>{
+  const d=await api('/api/github/diagnostics');renderGithubDiag(d);$('#modelDetail').textContent=JSON.stringify(d,null,2);
+},{loadingText:'진단 중...',targetEl:$('#githubDiagResult'),loadingHtml:'GitHub 저장소·워크플로·토큰 접근권한을 확인 중입니다...'});
 function renderValidation(v){if(!v)return;const counts=v.counts||{};const errors=(v.errors||[]).map(x=>`<li>${x}</li>`).join('');const warnings=(v.warnings||[]).map(x=>`<li>${x}</li>`).join('');$('#validationResult').innerHTML=`<b class="${v.ok?'good':'bad'}">${v.ok?'분석 가능':'분석 불가'}</b><p>국가 ${counts.teams||0} · 경기 ${counts.matches||0} · 사용 가능 엣지 ${counts.usableEdges||0} · 랭킹 ${counts.rankings||0}</p>${errors?`<h4>오류</h4><ul>${errors}</ul>`:''}${warnings?`<h4>주의</h4><ul>${warnings}</ul>`:''}<small>${v.recommendation||''}</small>`}
-$('#validateModel').onclick=async()=>{try{const v=await api(`/api/model-validation?type=${$('#modelNetwork').value}`);renderValidation(v);$('#modelDetail').textContent=JSON.stringify(v,null,2)}catch(e){$('#modelDetail').textContent=e.message}};
+$('#validateModel').onclick=withBusy($('#validateModel'),async()=>{
+  const v=await api(`/api/model-validation?type=${$('#modelNetwork').value}`);renderValidation(v);$('#modelDetail').textContent=JSON.stringify(v,null,2);
+},{loadingText:'검증 중...',targetEl:$('#validationResult'),loadingHtml:'실행 전 검증을 수행하는 중입니다...'});
 const STEP_ICON={completed_success:'✅',completed_failure:'❌',completed_cancelled:'⏹️',in_progress:'🔄',queued:'⏳',pending:'⏳'};
 function stepIcon(s){if(s.status==='completed')return s.conclusion==='success'?STEP_ICON.completed_success:s.conclusion==='cancelled'?STEP_ICON.completed_cancelled:STEP_ICON.completed_failure;if(s.status==='in_progress')return STEP_ICON.in_progress;return STEP_ICON.pending}
 function renderGithubStepProgress(d){
@@ -172,8 +235,26 @@ function startGithubPoll(runId){
   tick();
   githubPollTimer=setInterval(tick,8000);
 }
-$('#runModel').onclick=async()=>{try{const d=await api('/api/models',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#modelName').value,networkType:$('#modelNetwork').value,formula:formula(),analysisMode:$('#analysisMode').value})});$('#runLookup').value=d.runId;$('#modelResult').innerHTML=`실행번호 <b>#${d.runId}</b> · ${d.status}<br>${d.note}`;renderValidation(d.validation);$('#modelDetail').textContent=JSON.stringify(d,null,2);if(d.runId)startGithubPoll(d.runId);init()}catch(e){$('#modelDetail').textContent=e.message}};
-$('#checkModel').onclick=async()=>{const id=$('#runLookup').value;if(!id)return alert('실행번호를 입력하세요');try{const d=await api(`/api/models?id=${id}`);$('#modelResult').innerHTML=`실행번호 <b>#${d.id}</b> · ${d.status}`;$('#modelDetail').textContent=JSON.stringify(d,null,2);if(d.status==='completed'||d.status==='failed'){stopGithubPoll();const p=await api(`/api/github/run-progress?id=${id}`);renderGithubStepProgress(p)}else{startGithubPoll(id)}}catch(e){$('#modelDetail').textContent=e.message}};
+// v34: "모형 실행" 클릭 후 오른쪽 "분석 상태" 패널이 서버 응답이 올 때까지(POST 요청 +
+// GitHub Actions 디스패치 호출까지 포함해 1~2초 이상 걸릴 수 있음) 아무 변화가 없어서
+// "클릭이 됐나?" 오해를 유발하고 있었습니다. 이제 클릭 즉시 버튼이 비활성화되고, 오른쪽
+// 패널에도 바로 "요청하는 중입니다" 문구가 표시됩니다.
+$('#runModel').onclick=withBusy($('#runModel'),async()=>{
+  const d=await api('/api/models',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#modelName').value,networkType:$('#modelNetwork').value,formula:formula(),analysisMode:$('#analysisMode').value})});
+  $('#runLookup').value=d.runId;
+  $('#modelResult').innerHTML=`실행번호 <b>#${d.runId}</b> · ${d.status}<br>${d.note}`;
+  renderValidation(d.validation);$('#modelDetail').textContent=JSON.stringify(d,null,2);
+  if(d.runId)startGithubPoll(d.runId);
+  init();
+},{loadingText:'요청 중...',targetEl:$('#modelResult'),loadingHtml:'<span class="warn">모형 실행을 요청하는 중입니다... (GitHub Actions 디스패치 포함, 몇 초 걸릴 수 있습니다)</span>'});
+const doCheckModel=withBusy($('#checkModel'),async()=>{
+  const id=$('#runLookup').value;
+  const d=await api(`/api/models?id=${id}`);
+  $('#modelResult').innerHTML=`실행번호 <b>#${d.id}</b> · ${d.status}`;$('#modelDetail').textContent=JSON.stringify(d,null,2);
+  if(d.status==='completed'||d.status==='failed'){stopGithubPoll();const p=await api(`/api/github/run-progress?id=${id}`);renderGithubStepProgress(p)}
+  else{startGithubPoll(id)}
+},{loadingText:'조회 중...',targetEl:$('#modelResult'),loadingHtml:'상태를 조회하는 중입니다...'});
+$('#checkModel').onclick=()=>{if(!$('#runLookup').value)return alert('실행번호를 입력하세요');doCheckModel()};
 
 let githubDiagLoaded=false;
 async function autoGithubDiagnostic(){if(githubDiagLoaded)return;githubDiagLoaded=true;try{$('#githubDiagResult').textContent='GitHub 연결을 자동 확인 중입니다...';const d=await api('/api/github/diagnostics');renderGithubDiag(d);$('#modelDetail').textContent=JSON.stringify(d,null,2)}catch(e){githubDiagLoaded=false;$('#githubDiagResult').innerHTML=`<b class="bad">자동 진단 실패</b><p>${e.message}</p>`}}
@@ -199,9 +280,6 @@ function exportCanvasPNG(canvasId,filename){
   const canvas=document.getElementById(canvasId);if(!canvas)return alert('그래프를 먼저 생성하세요');
   const a=document.createElement('a');a.href=canvas.toDataURL('image/png');a.download=filename;a.click();
 }
-// v33 제안 #5: draw()와 동일한 원형(대륙연맹별) 레이아웃을 SVG 마크업으로 재구성합니다.
-// 캔버스는 래스터(픽셀)라 확대하면 깨지지만, SVG는 벡터라 논문/포스터에 확대 삽입해도
-// 깨지지 않고, Illustrator/Inkscape에서 색상·라벨을 편집할 수 있습니다.
 function buildNetworkSVG(data,width=1200,height=700){
   const nodes=Array.isArray(data?.nodes)?data.nodes:[],links=Array.isArray(data?.links)?data.links:[];
   if(!nodes.length)return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#091727"/><text x="50%" y="50%" fill="#91a7be" font-size="16" text-anchor="middle">표시할 네트워크 데이터가 없습니다.</text></svg>`;
@@ -233,22 +311,20 @@ function exportNetworkSVG(data,filename){
   const svg=buildNetworkSVG(data,1200,700);
   triggerBlobDownload(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}),filename);
 }
-$('#exportPngBtn1').onclick=()=>exportCanvasPNG('networkCanvas','fifa-network-dashboard.png');
-$('#exportSvgBtn1').onclick=()=>exportNetworkSVG(window.__lastHomeNetwork,'fifa-network-dashboard.svg');
-$('#exportPngBtn2').onclick=()=>exportCanvasPNG('networkCanvas2','fifa-network-explorer.png');
-$('#exportSvgBtn2').onclick=()=>exportNetworkSVG(window.__lastExplorerNetwork,'fifa-network-explorer.svg');
+$('#exportPngBtn1').onclick=()=>{exportCanvasPNG('networkCanvas','fifa-network-dashboard.png');flashButton($('#exportPngBtn1'),'저장됨 ✓')};
+$('#exportSvgBtn1').onclick=()=>{exportNetworkSVG(window.__lastHomeNetwork,'fifa-network-dashboard.svg');flashButton($('#exportSvgBtn1'),'저장됨 ✓')};
+$('#exportPngBtn2').onclick=()=>{exportCanvasPNG('networkCanvas2','fifa-network-explorer.png');flashButton($('#exportPngBtn2'),'저장됨 ✓')};
+$('#exportSvgBtn2').onclick=()=>{exportNetworkSVG(window.__lastExplorerNetwork,'fifa-network-explorer.svg');flashButton($('#exportSvgBtn2'),'저장됨 ✓')};
 async function drawExplorer(){
-  const from=$('#from').value,to=$('#to').value,type=$('#networkType').value,matchType=$('#matchTypeFilter')?.value||'all';const btn=$('#drawBtn');btn.disabled=true;btn.textContent='생성 중...';
-  try{const d=await api(`/api/network?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&type=${encodeURIComponent(type)}&matchType=${encodeURIComponent(matchType)}`);window.__lastExplorerNetwork=d;draw(d,'networkCanvas2');$('#netStats').innerHTML=`노드 <b>${d.nodes.length}</b> · 엣지 <b>${d.links.length}</b> · 원자료 경기 <b>${d.meta.matches}</b> · 고립 노드 <b>${d.meta.isolateCount||0}</b>`}catch(e){$('#netStats').textContent=e.message}finally{btn.disabled=false;btn.textContent='그래프 생성'}
+  const from=$('#from').value,to=$('#to').value,type=$('#networkType').value,matchType=$('#matchTypeFilter')?.value||'all';const btn=$('#drawBtn');if(btn.disabled)return;
+  const orig=btn.textContent;btn.disabled=true;btn.textContent='생성 중...';
+  try{const d=await api(`/api/network?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&type=${encodeURIComponent(type)}&matchType=${encodeURIComponent(matchType)}`);window.__lastExplorerNetwork=d;draw(d,'networkCanvas2');$('#netStats').innerHTML=`노드 <b>${d.nodes.length}</b> · 엣지 <b>${d.links.length}</b> · 원자료 경기 <b>${d.meta.matches}</b> · 고립 노드 <b>${d.meta.isolateCount||0}</b>`}catch(e){$('#netStats').textContent=e.message}finally{btn.disabled=false;btn.textContent=orig}
 }
 $('#drawBtn').onclick=drawExplorer;
 window.addEventListener('resize',()=>{
   clearTimeout(window.__graphResize);
   window.__graphResize=setTimeout(()=>{
     // v28: 창 크기 변경(모바일 키보드 열림/닫힘 포함)은 캔버스만 다시 그리면 충분합니다.
-    // 예전에는 여기서 init()을 호출해 대시보드·품질·랭킹·네트워크 4~5개 API를 매번 다시
-    // 불러왔는데, 텍스트 입력 시 키보드가 뜨고 닫힐 때마다 리사이즈 이벤트가 발생하는
-    // 모바일에서는 그때마다 전체 페이지가 새로고침되는 것 같은 체감 지연을 유발했습니다.
     if(window.__lastHomeNetwork)draw(window.__lastHomeNetwork,'networkCanvas');
     else init();
     if($('#network').classList.contains('active')){
@@ -260,85 +336,86 @@ window.addEventListener('resize',()=>{
 
 document.addEventListener('DOMContentLoaded',()=>{init();setTimeout(autoGithubDiagnostic,300)});
 
-async function loadAnalytics(){try{const d=await api(`/api/analytics?type=${$('#analyticsType')?.value||'win'}&matchType=${$('#analyticsMatchType')?.value||'all'}`);renderAnalytics(d)}catch(e){if($('#modelComparison'))$('#modelComparison').textContent=e.message}}
-$('#nullModelBtn').onclick=async()=>{
-  const type=$('#analyticsType').value,matchType=$('#analyticsMatchType').value;
-  $('#nullModelResult').innerHTML='계산 중...';
-  try{
-    const d=await api(`/api/null-model?type=${type}&matchType=${matchType}`);
-    if(!d.ok){$('#nullModelResult').textContent=d.error||'실패했습니다.';return}
-    $('#nullModelResult').innerHTML=`
-      <div class="table-wrap"><table><thead><tr><th>지표</th><th>실제 관측</th><th>ER 무작위 기대값</th><th>비율(관측/기대)</th></tr></thead><tbody>
-        <tr><td>군집계수(clustering)</td><td>${d.observed.clustering}</td><td>${d.erNullModel.clustering}</td><td>${d.clusteringRatio??'-'}</td></tr>
-        <tr><td>차수 분산</td><td>${d.observed.degreeVariance}</td><td>${d.erNullModel.degreeVariance}</td><td>${d.degreeVarianceRatio??'-'}</td></tr>
-      </tbody></table></div>
-      <p style="margin-top:8px">노드 ${d.n}개 · 엣지 ${d.m}개 · 밀도 ${d.density}</p>
-      <p style="color:#91a7be">${d.interpretation}</p>
-    `;
-  }catch(e){$('#nullModelResult').textContent=e.message}
-};
-$('#confedBtn').onclick=async()=>{
-  const type=$('#analyticsType').value,matchType=$('#analyticsMatchType').value;
-  $('#confedResult').innerHTML='계산 중...';
-  try{
-    const d=await api(`/api/confederation-breakdown?type=${type}&matchType=${matchType}`);
-    if(!d.ok){$('#confedResult').textContent=d.error||'실패했습니다.';return}
-    const rows=d.confederations.map(c=>`<tr><td>${c.confederation}</td><td>${c.nodeCount}</td><td>${c.withinEdgeCount}</td><td>${c.density}</td><td>${c.averageDegree}</td></tr>`).join('');
-    $('#confedResult').innerHTML=`
-      <div class="table-wrap"><table><thead><tr><th>연맹</th><th>국가 수</th><th>연맹 내 엣지</th><th>밀도</th><th>평균 연결</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <p style="margin-top:8px">연맹 내부 연결 비율(withinShare): <b>${(d.homophily.withinShare*100).toFixed(1)}%</b> (연맹 내 ${d.homophily.withinEdges} / 연맹 간 ${d.homophily.crossEdges})</p>
-      <p style="color:#91a7be">${d.note}</p>
-    `;
-  }catch(e){$('#confedResult').textContent=e.message}
-};
-function renderAnalytics(d){if(!$('#analyticsCards'))return;$('#analyticsCards').innerHTML=card('노드',d.meta.nodeCount)+card('엣지',d.meta.edgeCount)+card('커뮤니티',d.meta.communities)+card('분석유형',d.meta.type);const body=$('#centralityTable tbody');body.innerHTML=(d.top||[]).map((x,i)=>`<tr><td>${i+1}</td><td><b>${x.name}</b><small>${x.code}</small></td><td>${x.confederation}</td><td>${x.totalDegree}</td><td>${x.pageRank}</td><td>${x.community}</td></tr>`).join('');$('#confederationSummary').innerHTML=(d.confederations||[]).sort((a,b)=>b.averageDegree-a.averageDegree).map(x=>`<div class="rank-row"><b>${x.name}</b><span>${x.nodes}개국 · 평균 Degree ${x.averageDegree}</span></div>`).join('')}
-$('#analyticsBtn').onclick=loadAnalytics;
-$('#comparisonBtn').onclick=async()=>{try{const d=await api('/api/model-comparison');const best=d.best?`<p class="good"><b>최적 AIC 모형 #${d.best.id}</b> · AIC ${d.best.aic} · ${d.best.usedFormula}</p>`:'<p>완료된 비교 가능 모형이 없습니다.</p>';$('#modelComparison').innerHTML=best+`<div class="table-wrap"><table><thead><tr><th>ID</th><th>모형</th><th>상태</th><th>AIC</th><th>BIC</th><th>수렴</th><th>실제 식</th></tr></thead><tbody>${(d.rows||[]).map(x=>`<tr><td>#${x.id}</td><td>${x.name}</td><td>${x.status}</td><td>${x.aic??'-'}</td><td>${x.bic??'-'}</td><td>${x.converged?'예':'아니오'}</td><td><code>${x.usedFormula||x.formula}</code></td></tr>`).join('')}</tbody></table></div>`}catch(e){$('#modelComparison').textContent=e.message}};
-
-
-async function downloadUrl(url,name){
-  try{
-    const res=await fetch(url);
-    if(!res.ok){
-      let msg=`다운로드 실패(HTTP ${res.status})`;
-      try{const t=await res.clone().json();if(t.error)msg=t.error}catch{}
-      throw new Error(msg)
-    }
-    triggerBlobDownload(await res.blob(),name)
-  }catch(e){alert(`파일을 받아오지 못했습니다: ${e.message}`)}
+async function loadAnalytics(){
+  if($('#analyticsCards'))$('#analyticsCards').innerHTML='<div class="metric"><span>불러오는 중</span><b>...</b></div>';
+  try{const d=await api(`/api/analytics?type=${$('#analyticsType')?.value||'win'}&matchType=${$('#analyticsMatchType')?.value||'all'}`);renderAnalytics(d)}catch(e){if($('#analyticsCards'))$('#analyticsCards').innerHTML=`<div class="metric"><span>오류</span><b>${e.message}</b></div>`}
 }
+$('#nullModelBtn').onclick=withBusy($('#nullModelBtn'),async()=>{
+  const type=$('#analyticsType').value,matchType=$('#analyticsMatchType').value;
+  const d=await api(`/api/null-model?type=${type}&matchType=${matchType}`);
+  if(!d.ok){$('#nullModelResult').textContent=d.error||'실패했습니다.';return}
+  $('#nullModelResult').innerHTML=`
+    <div class="table-wrap"><table><thead><tr><th>지표</th><th>실제 관측</th><th>ER 무작위 기대값</th><th>비율(관측/기대)</th></tr></thead><tbody>
+      <tr><td>군집계수(clustering)</td><td>${d.observed.clustering}</td><td>${d.erNullModel.clustering}</td><td>${d.clusteringRatio??'-'}</td></tr>
+      <tr><td>차수 분산</td><td>${d.observed.degreeVariance}</td><td>${d.erNullModel.degreeVariance}</td><td>${d.degreeVarianceRatio??'-'}</td></tr>
+    </tbody></table></div>
+    <p style="margin-top:8px">노드 ${d.n}개 · 엣지 ${d.m}개 · 밀도 ${d.density}</p>
+    <p style="color:#91a7be">${d.interpretation}</p>
+  `;
+},{loadingText:'계산 중...',targetEl:$('#nullModelResult'),loadingHtml:'계산 중...'});
+$('#confedBtn').onclick=withBusy($('#confedBtn'),async()=>{
+  const type=$('#analyticsType').value,matchType=$('#analyticsMatchType').value;
+  const d=await api(`/api/confederation-breakdown?type=${type}&matchType=${matchType}`);
+  if(!d.ok){$('#confedResult').textContent=d.error||'실패했습니다.';return}
+  const rows=d.confederations.map(c=>`<tr><td>${c.confederation}</td><td>${c.nodeCount}</td><td>${c.withinEdgeCount}</td><td>${c.density}</td><td>${c.averageDegree}</td></tr>`).join('');
+  $('#confedResult').innerHTML=`
+    <div class="table-wrap"><table><thead><tr><th>연맹</th><th>국가 수</th><th>연맹 내 엣지</th><th>밀도</th><th>평균 연결</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p style="margin-top:8px">연맹 내부 연결 비율(withinShare): <b>${(d.homophily.withinShare*100).toFixed(1)}%</b> (연맹 내 ${d.homophily.withinEdges} / 연맹 간 ${d.homophily.crossEdges})</p>
+    <p style="color:#91a7be">${d.note}</p>
+  `;
+},{loadingText:'계산 중...',targetEl:$('#confedResult'),loadingHtml:'계산 중...'});
+function renderAnalytics(d){if(!$('#analyticsCards'))return;$('#analyticsCards').innerHTML=card('노드',d.meta.nodeCount)+card('엣지',d.meta.edgeCount)+card('커뮤니티',d.meta.communities)+card('분석유형',d.meta.type);const body=$('#centralityTable tbody');body.innerHTML=(d.top||[]).map((x,i)=>`<tr><td>${i+1}</td><td><b>${x.name}</b><small>${x.code}</small></td><td>${x.confederation}</td><td>${x.totalDegree}</td><td>${x.pageRank}</td><td>${x.community}</td></tr>`).join('');$('#confederationSummary').innerHTML=(d.confederations||[]).sort((a,b)=>b.averageDegree-a.averageDegree).map(x=>`<div class="rank-row"><b>${x.name}</b><span>${x.nodes}개국 · 평균 Degree ${x.averageDegree}</span></div>`).join('')}
+$('#analyticsBtn').onclick=withBusy($('#analyticsBtn'),loadAnalytics,{loadingText:'계산 중...'});
+$('#comparisonBtn').onclick=withBusy($('#comparisonBtn'),async()=>{
+  const d=await api('/api/model-comparison');
+  const best=d.best?`<p class="good"><b>최적 AIC 모형 #${d.best.id}</b> · AIC ${d.best.aic} · ${d.best.usedFormula}</p>`:'<p>완료된 비교 가능 모형이 없습니다.</p>';
+  $('#modelComparison').innerHTML=best+`<div class="table-wrap"><table><thead><tr><th>ID</th><th>모형</th><th>상태</th><th>AIC</th><th>BIC</th><th>수렴</th><th>실제 식</th></tr></thead><tbody>${(d.rows||[]).map(x=>`<tr><td>#${x.id}</td><td>${x.name}</td><td>${x.status}</td><td>${x.aic??'-'}</td><td>${x.bic??'-'}</td><td>${x.converged?'예':'아니오'}</td><td><code>${x.usedFormula||x.formula}</code></td></tr>`).join('')}</tbody></table></div>`;
+},{loadingText:'비교 중...',targetEl:$('#modelComparison'),loadingHtml:'모형 비교를 불러오는 중입니다...'});
+
 async function loadProjects(){try{const rows=await api('/api/projects');$('#projectList').innerHTML=rows.length?rows.map(x=>`<div class="rank-row"><b>#${x.id} ${x.project_name}</b><span>${x.network_type} · 스냅샷 ${x.snapshot_count} · 모형 ${x.model_count}</span></div>`).join(''):'프로젝트가 없습니다.';return rows}catch(e){$('#projectList').textContent=e.message;return[]}}
-$('#createProjectBtn').onclick=async()=>{try{const d=await api('/api/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#projectName').value,researchQuestion:$('#projectQuestion').value,networkType:'win'})});$('#researchLog').textContent=JSON.stringify(d,null,2);await loadProjects()}catch(e){$('#researchLog').textContent=e.message}};
-$('#temporalBtn').onclick=async()=>{try{const d=await api(`/api/temporal-network?type=${$('#temporalType').value}`);$('#temporalResult').innerHTML=`<div class="table-wrap"><table><thead><tr><th>연도</th><th>노드</th><th>엣지</th><th>경기</th><th>밀도</th><th>평균차수</th></tr></thead><tbody>${d.series.map(x=>`<tr><td>${x.year}</td><td>${x.nodeCount}</td><td>${x.edgeCount}</td><td>${x.matchCount}</td><td>${x.density}</td><td>${x.averageDegree}</td></tr>`).join('')}</tbody></table></div><small>${d.note}</small>`;$('#researchLog').textContent=JSON.stringify(d,null,2)}catch(e){$('#researchLog').textContent=e.message}};
-$('#periodCompareBtn').onclick=async()=>{
+$('#createProjectBtn').onclick=withBusy($('#createProjectBtn'),async()=>{
+  const d=await api('/api/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#projectName').value,researchQuestion:$('#projectQuestion').value,networkType:'win'})});
+  $('#researchLog').textContent=JSON.stringify(d,null,2);await loadProjects();
+},{loadingText:'생성 중...',targetEl:$('#researchLog'),loadingHtml:'프로젝트를 생성하는 중입니다...'});
+$('#temporalBtn').onclick=withBusy($('#temporalBtn'),async()=>{
+  const d=await api(`/api/temporal-network?type=${$('#temporalType').value}`);
+  $('#temporalResult').innerHTML=`<div class="table-wrap"><table><thead><tr><th>연도</th><th>노드</th><th>엣지</th><th>경기</th><th>밀도</th><th>평균차수</th></tr></thead><tbody>${d.series.map(x=>`<tr><td>${x.year}</td><td>${x.nodeCount}</td><td>${x.edgeCount}</td><td>${x.matchCount}</td><td>${x.density}</td><td>${x.averageDegree}</td></tr>`).join('')}</tbody></table></div><small>${d.note}</small>`;
+  $('#researchLog').textContent=JSON.stringify(d,null,2);
+},{loadingText:'계산 중...',targetEl:$('#temporalResult'),loadingHtml:'연도별 지표를 계산하는 중입니다...'});
+const doPeriodCompare=withBusy($('#periodCompareBtn'),async()=>{
   const type=$('#periodType').value,aFrom=$('#periodAFrom').value,aTo=$('#periodATo').value,bFrom=$('#periodBFrom').value,bTo=$('#periodBTo').value;
+  const d=await api(`/api/period-comparison?type=${type}&aFrom=${aFrom}&aTo=${aTo}&bFrom=${bFrom}&bTo=${bTo}`);
+  if(!d.ok){$('#periodResult').textContent=d.error||'비교에 실패했습니다.';return}
+  const metricRow=(label,a,b,delta)=>`<tr><td>${label}</td><td>${a}</td><td>${b}</td><td>${delta}</td></tr>`;
+  const moversRows=(d.topMovers||[]).map(m=>`<tr><td>${m.name}</td><td>${m.rankA??'-'}</td><td>${m.rankB??'-'}</td><td style="color:${m.delta>0?'#5fd58e':m.delta<0?'#e0715f':'#91a7be'}">${m.delta>0?'▲':m.delta<0?'▼':'-'} ${Math.abs(m.delta)}</td></tr>`).join('');
+  $('#periodResult').innerHTML=`
+    <div style="margin-bottom:8px">기간 A: ${d.periodA.from} ~ ${d.periodA.to} &nbsp;|&nbsp; 기간 B: ${d.periodB.from} ~ ${d.periodB.to}</div>
+    <div class="table-wrap"><table><thead><tr><th>지표</th><th>기간 A</th><th>기간 B</th><th>변화</th></tr></thead><tbody>
+      ${metricRow('노드 수',d.periodA.nodeCount,d.periodB.nodeCount,d.delta.nodeCount)}
+      ${metricRow('엣지 수',d.periodA.edgeCount,d.periodB.edgeCount,d.delta.edgeCount)}
+      ${metricRow('활성 노드(고립 아님)',d.periodA.activeNodes,d.periodB.activeNodes,d.periodB.activeNodes-d.periodA.activeNodes)}
+      ${metricRow('밀도',d.periodA.density,d.periodB.density,d.delta.density)}
+      ${metricRow('평균 연결수',d.periodA.avgDegree,d.periodB.avgDegree,d.delta.avgDegree)}
+      ${metricRow('커뮤니티 수',d.periodA.communities,d.periodB.communities,d.periodB.communities-d.periodA.communities)}
+    </tbody></table></div>
+    <h4 style="margin-top:12px">순위 변동이 큰 국가 (PageRank 기준, 상위 15개)</h4>
+    <div class="table-wrap"><table><thead><tr><th>국가</th><th>기간 A 순위</th><th>기간 B 순위</th><th>변동</th></tr></thead><tbody>${moversRows||'<tr><td colspan="4">비교할 데이터가 부족합니다</td></tr>'}</tbody></table></div>
+  `;
+},{loadingText:'비교 중...',targetEl:$('#periodResult'),loadingHtml:'비교 계산 중...'});
+$('#periodCompareBtn').onclick=()=>{
+  const aFrom=$('#periodAFrom').value,aTo=$('#periodATo').value,bFrom=$('#periodBFrom').value,bTo=$('#periodBTo').value;
   if(!aFrom||!aTo||!bFrom||!bTo)return alert('기간 A, B의 시작·종료 날짜를 모두 입력하세요');
-  $('#periodResult').innerHTML='비교 계산 중...';
-  try{
-    const d=await api(`/api/period-comparison?type=${type}&aFrom=${aFrom}&aTo=${aTo}&bFrom=${bFrom}&bTo=${bTo}`);
-    if(!d.ok){$('#periodResult').textContent=d.error||'비교에 실패했습니다.';return}
-    const metricRow=(label,a,b,delta)=>`<tr><td>${label}</td><td>${a}</td><td>${b}</td><td>${delta}</td></tr>`;
-    const moversRows=(d.topMovers||[]).map(m=>`<tr><td>${m.name}</td><td>${m.rankA??'-'}</td><td>${m.rankB??'-'}</td><td style="color:${m.delta>0?'#5fd58e':m.delta<0?'#e0715f':'#91a7be'}">${m.delta>0?'▲':m.delta<0?'▼':'-'} ${Math.abs(m.delta)}</td></tr>`).join('');
-    $('#periodResult').innerHTML=`
-      <div style="margin-bottom:8px">기간 A: ${d.periodA.from} ~ ${d.periodA.to} &nbsp;|&nbsp; 기간 B: ${d.periodB.from} ~ ${d.periodB.to}</div>
-      <div class="table-wrap"><table><thead><tr><th>지표</th><th>기간 A</th><th>기간 B</th><th>변화</th></tr></thead><tbody>
-        ${metricRow('노드 수',d.periodA.nodeCount,d.periodB.nodeCount,d.delta.nodeCount)}
-        ${metricRow('엣지 수',d.periodA.edgeCount,d.periodB.edgeCount,d.delta.edgeCount)}
-        ${metricRow('활성 노드(고립 아님)',d.periodA.activeNodes,d.periodB.activeNodes,d.periodB.activeNodes-d.periodA.activeNodes)}
-        ${metricRow('밀도',d.periodA.density,d.periodB.density,d.delta.density)}
-        ${metricRow('평균 연결수',d.periodA.avgDegree,d.periodB.avgDegree,d.delta.avgDegree)}
-        ${metricRow('커뮤니티 수',d.periodA.communities,d.periodB.communities,d.periodB.communities-d.periodA.communities)}
-      </tbody></table></div>
-      <h4 style="margin-top:12px">순위 변동이 큰 국가 (PageRank 기준, 상위 15개)</h4>
-      <div class="table-wrap"><table><thead><tr><th>국가</th><th>기간 A 순위</th><th>기간 B 순위</th><th>변동</th></tr></thead><tbody>${moversRows||'<tr><td colspan="4">비교할 데이터가 부족합니다</td></tr>'}</tbody></table></div>
-    `;
-  }catch(e){$('#periodResult').textContent=e.message}
+  doPeriodCompare();
 };
-$('#freezeBtn').onclick=async()=>{try{const projects=await loadProjects(),projectId=projects[0]?.id||null;const d=await api('/api/dataset-freeze',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`FIFA Dataset ${new Date().toISOString().slice(0,10)}`,projectId})});$('#researchLog').textContent=JSON.stringify(d,null,2)}catch(e){$('#researchLog').textContent=e.message}};
-$('#reportBtn').onclick=async()=>download('fifa-network-reproducibility-report-v13.json',await api('/api/reproducibility-report'));
-$('#graphmlBtn').onclick=()=>downloadUrl('/api/export/graphml?type=win','fifa-network.graphml');
-$('#gexfBtn').onclick=()=>downloadUrl('/api/export/gexf?type=win','fifa-network.gexf');
-$('#bibtexBtn').onclick=()=>downloadUrl('/api/citation?format=bibtex','fifa-network-lab.bib');
-$('#risBtn').onclick=()=>downloadUrl('/api/citation?format=ris','fifa-network-lab.ris');
-$('#apaBtn').onclick=()=>downloadUrl('/api/citation?format=apa','fifa-network-lab-apa.txt');
+$('#freezeBtn').onclick=withBusy($('#freezeBtn'),async()=>{
+  const projects=await loadProjects(),projectId=projects[0]?.id||null;
+  const d=await api('/api/dataset-freeze',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`FIFA Dataset ${new Date().toISOString().slice(0,10)}`,projectId})});
+  $('#researchLog').textContent=JSON.stringify(d,null,2);
+},{loadingText:'동결 중...',targetEl:$('#researchLog'),loadingHtml:'데이터셋을 동결하는 중입니다...'});
+$('#reportBtn').onclick=withBusy($('#reportBtn'),async()=>download('fifa-network-reproducibility-report-v13.json',await api('/api/reproducibility-report')),{loadingText:'생성 중...'});
+$('#graphmlBtn').onclick=withBusy($('#graphmlBtn'),()=>downloadUrl('/api/export/graphml?type=win','fifa-network.graphml'),{loadingText:'내보내는 중...'});
+$('#gexfBtn').onclick=withBusy($('#gexfBtn'),()=>downloadUrl('/api/export/gexf?type=win','fifa-network.gexf'),{loadingText:'내보내는 중...'});
+$('#bibtexBtn').onclick=withBusy($('#bibtexBtn'),()=>downloadUrl('/api/citation?format=bibtex','fifa-network-lab.bib'),{loadingText:'내보내는 중...'});
+$('#risBtn').onclick=withBusy($('#risBtn'),()=>downloadUrl('/api/citation?format=ris','fifa-network-lab.ris'),{loadingText:'내보내는 중...'});
+$('#apaBtn').onclick=withBusy($('#apaBtn'),()=>downloadUrl('/api/citation?format=apa','fifa-network-lab-apa.txt'),{loadingText:'내보내는 중...'});
 document.addEventListener('DOMContentLoaded',()=>setTimeout(loadProjects,500));
