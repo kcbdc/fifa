@@ -54,6 +54,28 @@ $('#interpretLatest').onclick=async()=>{
   }catch(e){$('#paperInsight').textContent=e.message}
   finally{btn.disabled=false;btn.textContent=orig}
 };
+$('#gofViewBtn').onclick=async()=>{
+  const id=$('#gofRunId').value;if(!id)return alert('실행번호를 입력하세요');
+  $('#gofReportBox').innerHTML='불러오는 중...';
+  try{
+    const d=await api(`/api/gof-report?id=${id}`);
+    if(!d.ok){$('#gofReportBox').textContent=d.error||'리포트를 생성할 수 없습니다.';return}
+    if(d.note){$('#gofReportBox').textContent=d.note;return}
+    const coefRows=(d.coefficients||[]).map(c=>`<tr><td>${c.term}</td><td>${Number(c.estimate).toFixed(4)}</td><td>${Number(c.std_error).toFixed(4)}</td><td>${Number(c.p_value).toFixed(4)}</td><td>${Number(c.odds_ratio).toFixed(3)}</td></tr>`).join('');
+    $('#gofReportBox').innerHTML=`
+      <div style="margin-bottom:8px"><b>${d.modelName||''}</b> · ${d.networkType==='win'?'승리 네트워크':'경기 네트워크'} · 실행번호 #${d.runId}</div>
+      <div style="margin-bottom:8px">공식: <code>${d.formula||'-'}</code>${d.fallbackUsed?' <span class="warn">(자동 단순화됨)</span>':''}</div>
+      <div style="margin-bottom:8px">AIC ${d.aic??'-'} · BIC ${d.bic??'-'} · 수렴 ${d.converged?'예':'확인 필요'} · MCMC 사용 ${d.mcmcUsed?'예':'아니오(MPLE)'} · GOF ${d.gofAvailable?'가능':'생략됨'}</div>
+      <div class="table-wrap"><table><thead><tr><th>항</th><th>Estimate</th><th>SE</th><th>p-value</th><th>Odds Ratio</th></tr></thead><tbody>${coefRows||'<tr><td colspan="5">계수 없음</td></tr>'}</tbody></table></div>
+      <h4 style="margin-top:12px">GOF 원본 출력</h4><pre>${(d.gofText||[]).join('\n')||'(GOF 출력 없음)'}</pre>
+      ${d.mcmcDiagnosticsNote?`<h4>MCMC 진단 참고</h4><p style="color:#91a7be">${d.mcmcDiagnosticsNote}</p>`:''}
+    `;
+  }catch(e){$('#gofReportBox').textContent=e.message}
+};
+$('#gofExportBtn').onclick=()=>{
+  const id=$('#gofRunId').value;if(!id)return alert('실행번호를 입력하세요');
+  downloadUrl(`/api/gof-report/export?id=${id}`,`gof-report-run-${id}.md`);
+};
 function uploadWithProgress(path,payload,onProgress){
   return new Promise((resolve,reject)=>{
     const xhr=new XMLHttpRequest();
@@ -196,6 +218,30 @@ async function downloadUrl(url,name){
 async function loadProjects(){try{const rows=await api('/api/projects');$('#projectList').innerHTML=rows.length?rows.map(x=>`<div class="rank-row"><b>#${x.id} ${x.project_name}</b><span>${x.network_type} · 스냅샷 ${x.snapshot_count} · 모형 ${x.model_count}</span></div>`).join(''):'프로젝트가 없습니다.';return rows}catch(e){$('#projectList').textContent=e.message;return[]}}
 $('#createProjectBtn').onclick=async()=>{try{const d=await api('/api/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#projectName').value,researchQuestion:$('#projectQuestion').value,networkType:'win'})});$('#researchLog').textContent=JSON.stringify(d,null,2);await loadProjects()}catch(e){$('#researchLog').textContent=e.message}};
 $('#temporalBtn').onclick=async()=>{try{const d=await api(`/api/temporal-network?type=${$('#temporalType').value}`);$('#temporalResult').innerHTML=`<div class="table-wrap"><table><thead><tr><th>연도</th><th>노드</th><th>엣지</th><th>경기</th><th>밀도</th><th>평균차수</th></tr></thead><tbody>${d.series.map(x=>`<tr><td>${x.year}</td><td>${x.nodeCount}</td><td>${x.edgeCount}</td><td>${x.matchCount}</td><td>${x.density}</td><td>${x.averageDegree}</td></tr>`).join('')}</tbody></table></div><small>${d.note}</small>`;$('#researchLog').textContent=JSON.stringify(d,null,2)}catch(e){$('#researchLog').textContent=e.message}};
+$('#periodCompareBtn').onclick=async()=>{
+  const type=$('#periodType').value,aFrom=$('#periodAFrom').value,aTo=$('#periodATo').value,bFrom=$('#periodBFrom').value,bTo=$('#periodBTo').value;
+  if(!aFrom||!aTo||!bFrom||!bTo)return alert('기간 A, B의 시작·종료 날짜를 모두 입력하세요');
+  $('#periodResult').innerHTML='비교 계산 중...';
+  try{
+    const d=await api(`/api/period-comparison?type=${type}&aFrom=${aFrom}&aTo=${aTo}&bFrom=${bFrom}&bTo=${bTo}`);
+    if(!d.ok){$('#periodResult').textContent=d.error||'비교에 실패했습니다.';return}
+    const metricRow=(label,a,b,delta)=>`<tr><td>${label}</td><td>${a}</td><td>${b}</td><td>${delta}</td></tr>`;
+    const moversRows=(d.topMovers||[]).map(m=>`<tr><td>${m.name}</td><td>${m.rankA??'-'}</td><td>${m.rankB??'-'}</td><td style="color:${m.delta>0?'#5fd58e':m.delta<0?'#e0715f':'#91a7be'}">${m.delta>0?'▲':m.delta<0?'▼':'-'} ${Math.abs(m.delta)}</td></tr>`).join('');
+    $('#periodResult').innerHTML=`
+      <div style="margin-bottom:8px">기간 A: ${d.periodA.from} ~ ${d.periodA.to} &nbsp;|&nbsp; 기간 B: ${d.periodB.from} ~ ${d.periodB.to}</div>
+      <div class="table-wrap"><table><thead><tr><th>지표</th><th>기간 A</th><th>기간 B</th><th>변화</th></tr></thead><tbody>
+        ${metricRow('노드 수',d.periodA.nodeCount,d.periodB.nodeCount,d.delta.nodeCount)}
+        ${metricRow('엣지 수',d.periodA.edgeCount,d.periodB.edgeCount,d.delta.edgeCount)}
+        ${metricRow('활성 노드(고립 아님)',d.periodA.activeNodes,d.periodB.activeNodes,d.periodB.activeNodes-d.periodA.activeNodes)}
+        ${metricRow('밀도',d.periodA.density,d.periodB.density,d.delta.density)}
+        ${metricRow('평균 연결수',d.periodA.avgDegree,d.periodB.avgDegree,d.delta.avgDegree)}
+        ${metricRow('커뮤니티 수',d.periodA.communities,d.periodB.communities,d.periodB.communities-d.periodA.communities)}
+      </tbody></table></div>
+      <h4 style="margin-top:12px">순위 변동이 큰 국가 (PageRank 기준, 상위 15개)</h4>
+      <div class="table-wrap"><table><thead><tr><th>국가</th><th>기간 A 순위</th><th>기간 B 순위</th><th>변동</th></tr></thead><tbody>${moversRows||'<tr><td colspan="4">비교할 데이터가 부족합니다</td></tr>'}</tbody></table></div>
+    `;
+  }catch(e){$('#periodResult').textContent=e.message}
+};
 $('#freezeBtn').onclick=async()=>{try{const projects=await loadProjects(),projectId=projects[0]?.id||null;const d=await api('/api/dataset-freeze',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:`FIFA Dataset ${new Date().toISOString().slice(0,10)}`,projectId})});$('#researchLog').textContent=JSON.stringify(d,null,2)}catch(e){$('#researchLog').textContent=e.message}};
 $('#reportBtn').onclick=async()=>download('fifa-network-reproducibility-report-v13.json',await api('/api/reproducibility-report'));
 $('#graphmlBtn').onclick=()=>downloadUrl('/api/export/graphml?type=win','fifa-network.graphml');

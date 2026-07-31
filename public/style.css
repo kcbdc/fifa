@@ -7,3 +7,7 @@
 /* v21 GitHub Actions 단계별 진행률 */
 .step-list{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:6px}
 .step-list li{padding:7px 10px;border-radius:8px;background:#08182a;border:1px solid #223d59;font-size:13px}
+
+/* v26 시간 구간 비교 */
+.period-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:12px}
+@media(max-width:760px){.period-grid{grid-template-columns:1fr}}
