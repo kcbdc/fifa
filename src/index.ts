@@ -12,6 +12,30 @@ type Obj=Record<string,any>;
 type Task={kind:'countries'|'gdp'|'population'|'matches'|'rankings'|'live_ranking'; month?:string; label:string};
 const VERSION='17.0.0';
 const j=(x:unknown,s=200)=>new Response(JSON.stringify(x),{status:s,headers:{'content-type':'application/json;charset=utf-8','cache-control':'no-store'}});
+// v28: 무거운 읽기 전용 분석 엔드포인트(/api/analytics, /api/network 등)는 매번 D1에서
+// 수천 건의 경기를 읽어와 PageRank·커뮤니티를 다시 계산합니다. 탭을 오갈 때마다, 심지어
+// 모바일에서 리사이즈될 때마다 이 계산이 반복되면 체감 속도가 크게 떨어집니다.
+// Cloudflare Workers 표준 Cache API로 같은 URL의 GET 응답을 짧게(기본 45초) 엣지에 캐싱해,
+// 데이터가 실시간으로 바뀌지 않는 연구용 대시보드 특성상 크게 문제되지 않는 선에서
+// 반복 요청을 D1까지 가지 않고 즉시 응답합니다.
+async function cachedJson(r:Request,ttlSeconds:number,compute:()=>Promise<unknown>):Promise<Response>{
+  const cache=(caches as any).default;
+  if(r.method!=='GET'||!cache){const body=await compute();return j(body)}
+  const key=new Request(r.url,{method:'GET'});
+  const hit=await cache.match(key);
+  if(hit)return new Response(hit.body,{status:hit.status,headers:{...Object.fromEntries(hit.headers),'x-cache':'HIT'}});
+  const body=await compute();
+  const res=new Response(JSON.stringify(body),{status:200,headers:{'content-type':'application/json;charset=utf-8','cache-control':`public, max-age=${ttlSeconds}`,'x-cache':'MISS'}});
+  try{await cache.put(key,res.clone())}catch{}
+  return res;
+}
+// 데이터가 실제로 바뀌는 쓰기 작업(수집/가져오기/정규화) 직후에는 캐시된 대시보드가 방금
+// 바뀐 숫자를 반영하지 못한 채로 몇십 초간 남아있을 수 있습니다. 파라미터가 없어 캐시 키가
+// 하나뿐인 /api/dashboard만이라도 즉시 무효화해 "방금 수집했는데 숫자가 그대로"인 혼란을 막습니다.
+async function purgeDashboardCache(base:string){
+  const cache=(caches as any).default;if(!cache)return;
+  try{await cache.delete(new Request(new URL('/api/dashboard',base).toString(),{method:'GET'}))}catch{}
+}
 const iso=(d=new Date())=>d.toISOString().slice(0,10);
 const auth=(r:Request,e:Env)=>!e.ADMIN_TOKEN||r.headers.get('authorization')===`Bearer ${e.ADMIN_TOKEN}`;
 const norm=(s:any)=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,' ').trim();
@@ -168,8 +192,8 @@ async function importRows(r:Request,e:Env){const b=await r.json() as any,rows=Ar
 async function progress(e:Env){const tasks=plan(e),cursor=Math.max(0,Number(await state(e,'v6_cursor','0'))||0),done=Math.min(cursor,tasks.length),next=tasks[done]||null;return{version:VERSION,total:tasks.length,completed:done,remaining:Math.max(0,tasks.length-done),percent:tasks.length?Math.round(done/tasks.length*100):100,next,finished:done>=tasks.length,windowMonths:months(Number(e.DATA_WINDOW_YEARS||4)).length,limitStrategy:'one task per invocation; batched D1 statements'}}
 async function collectOne(e:Env,reset=false){if(reset)await setState(e,'v6_cursor','0');const tasks=plan(e),cursor=Math.max(0,Number(await state(e,'v6_cursor','0'))||0);if(cursor>=tasks.length)return{ok:true,finished:true,progress:await progress(e),message:'최근 4년 배치 수집이 완료되었습니다.'};const task=tasks[cursor],jid=(await e.DB.prepare(`INSERT INTO collection_jobs(job_type,status,message) VALUES('v6_batch','running',?) RETURNING id`).bind(task.label).first<any>())?.id;try{let result:any;if(task.kind==='countries')result=await taskCountries(e);else if(task.kind==='gdp'||task.kind==='population')result=await taskIndicator(e,task.kind);else if(task.kind==='matches')result=await taskMatches(e,task.month!);else if(task.kind==='live_ranking')result=await taskLiveRanking(e);else result=await taskRankings(e,task.month!);await setState(e,'v6_cursor',String(cursor+1));await e.DB.prepare(`UPDATE collection_jobs SET status='success',finished_at=CURRENT_TIMESTAMP,inserted_count=?,warning_count=?,message=? WHERE id=?`).bind(result.inserted||0,result.warning?1:0,JSON.stringify({task,...result}),jid).run();return{ok:true,task,index:cursor+1,...result,progress:await progress(e)}}catch(x){await e.DB.prepare(`UPDATE collection_jobs SET status='failed',finished_at=CURRENT_TIMESTAMP,message=? WHERE id=?`).bind(String(x),jid).run();throw x}}
 async function dashboard(e:Env){
-  const normalizedAt=await state(e,'fifa_normalized_at','');
-  if(!normalizedAt)await normalizeExistingData(e);
+  let normalizedAt=await state(e,'fifa_normalized_at','');
+  if(!normalizedAt){await normalizeExistingData(e);normalizedAt=await state(e,'fifa_normalized_at','')}
   const one=async(s:string)=>(await e.DB.prepare(s).first<any>())||{};
   const [t,raw,m,r,i,runs,jobs,p,unmapped]=await Promise.all([
     one('SELECT COUNT(*) n FROM teams WHERE is_fifa_member=1 AND active=1'),
@@ -181,13 +205,13 @@ async function dashboard(e:Env){
     e.DB.prepare('SELECT * FROM collection_jobs ORDER BY id DESC LIMIT 5').all(),progress(e),
     one('SELECT COUNT(*) n FROM unmapped_team_names')
   ]);
-  return{teams:Number(t.n||0),rawTeams:Number(raw.n||0),excludedTeams:Math.max(0,Number(raw.n||0)-Number(t.n||0)),unmappedNames:Number(unmapped.n||0),matches:Number(m.n||0),rankings:Number(r.n||0),issues:Number(i.n||0),runs:runs.results,jobs:jobs.results,provider:cfg(e),progress:p,normalization:{masterCount:FIFA_MEMBERS.length,normalizedAt:(await state(e,'fifa_normalized_at',''))||null}}
+  return{teams:Number(t.n||0),rawTeams:Number(raw.n||0),excludedTeams:Math.max(0,Number(raw.n||0)-Number(t.n||0)),unmappedNames:Number(unmapped.n||0),matches:Number(m.n||0),rankings:Number(r.n||0),issues:Number(i.n||0),runs:runs.results,jobs:jobs.results,provider:cfg(e),progress:p,normalization:{masterCount:FIFA_MEMBERS.length,normalizedAt:normalizedAt||null}}
 }
 async function network(e:Env,u:URL){
   const from=u.searchParams.get('from')||months(Number(e.DATA_WINDOW_YEARS||4))[0]+'-01',to=u.searchParams.get('to')||iso(),type=u.searchParams.get('type')||'match';
   const [members,q]=await Promise.all([
     e.DB.prepare(`SELECT fifa_code,name_en,confederation FROM teams WHERE is_fifa_member=1 AND active=1 ORDER BY fifa_code`).all<any>(),
-    e.DB.prepare(`SELECT m.*,h.fifa_code hcode,h.name_en hname,h.confederation hconf,a.fifa_code acode,a.name_en aname,a.confederation aconf FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE m.match_date BETWEEN ? AND ? AND h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1`).bind(from,to).all<any>()
+    e.DB.prepare(`SELECT m.match_date,m.home_score,m.away_score,h.fifa_code hcode,h.name_en hname,h.confederation hconf,a.fifa_code acode,a.name_en aname,a.confederation aconf FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE m.match_date BETWEEN ? AND ? AND h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1`).bind(from,to).all<any>()
   ]);
   const ns=new Map<string,any>(),ls=new Map<string,any>();
   // FIFA 211개 회원국을 먼저 등록하여 분석기간 중 경기가 없는 국가도 고립 노드로 보존한다.
@@ -271,7 +295,11 @@ const STEP_LABELS_KO:Record<string,string>={
   'Run static ERGM':'ERGM 적합',
   'Run temporal ERGM':'TERGM 적합',
   'Write workflow manifest':'실행 기록 저장',
-  'Upload analysis artifacts':'결과물 업로드'
+  'Upload analysis artifacts':'결과물 업로드',
+  'Upload manifest artifact':'실행 기록 업로드'
+};
+const JOB_LABELS_KO:Record<string,string>={
+  'report-run':'0. 실행 등록','static-ergm':'정적 ERGM (병렬)','temporal-tergm':'시간적 TERGM (병렬)','manifest':'마무리'
 };
 async function githubRunProgress(e:Env,modelRunId:number){
   const run=await e.DB.prepare('SELECT id,status,github_run_id,github_run_url FROM model_runs WHERE id=?').bind(modelRunId).first<any>();
@@ -283,9 +311,16 @@ async function githubRunProgress(e:Env,modelRunId:number){
     const res=await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(run.github_run_id)}/jobs`,{headers:githubHeaders(e)});
     const body:any=await res.json().catch(()=>({}));
     if(!res.ok)return{ok:false,error:body?.message||`GitHub API 오류(HTTP ${res.status})`,runUrl:run.github_run_url};
-    const job=(body.jobs||[])[0];
-    const steps=(job?.steps||[]).map((s:any)=>({name:s.name,label:STEP_LABELS_KO[s.name]||s.name,status:s.status,conclusion:s.conclusion}));
-    return{ok:true,phase:run.status,jobStatus:job?.status||'unknown',jobConclusion:job?.conclusion||null,steps,runUrl:run.github_run_url}
+    // v29: analyze.yml이 report-run/static-ergm/temporal-tergm/manifest 4개 job으로
+    // 나뉘면서(정적/시간적 모형을 병렬 실행하기 위함), 더 이상 jobs[0]만 보면 안 됩니다.
+    // 모든 job의 step을 job 이름과 함께 평탄화해서 반환합니다. "skipped" 상태인 job(예:
+    // ergm 모드만 골랐을 때의 temporal-tergm)은 정상이므로 제외하지 않고 그대로 표시합니다.
+    const jobs=body.jobs||[];
+    const steps=jobs.flatMap((job:any)=>(job.steps||[]).map((s:any)=>({job:job.name,jobLabel:JOB_LABELS_KO[job.name]||job.name,name:s.name,label:STEP_LABELS_KO[s.name]||s.name,status:s.status,conclusion:s.conclusion})));
+    const relevantJobs=jobs.filter((j:any)=>j.conclusion!=='skipped');
+    const jobStatus=relevantJobs.length&&relevantJobs.every((j:any)=>j.status==='completed')?'completed':(relevantJobs.some((j:any)=>j.status==='in_progress')?'in_progress':'queued');
+    const jobConclusion=relevantJobs.length&&relevantJobs.every((j:any)=>j.status==='completed')?(relevantJobs.some((j:any)=>j.conclusion==='failure')?'failure':'success'):null;
+    return{ok:true,phase:run.status,jobStatus,jobConclusion,steps,runUrl:run.github_run_url}
   }catch(err){return{ok:false,error:String(err).slice(0,200),runUrl:run.github_run_url}}
 }
 async function githubDiagnostics(e:Env){
@@ -306,7 +341,7 @@ async function githubDiagnostics(e:Env){
   else if(out.ok)out.recommendation='GitHub 저장소와 워크플로 접근이 정상입니다. 모형 실행을 다시 시도하십시오.';
   return out
 }
-async function triggerGithub(e:Env,runId:number){
+async function triggerGithub(e:Env,runId:number,analysisMode:'both'|'ergm'|'tergm'='both'){
   if(!e.GITHUB_TOKEN||!e.GITHUB_OWNER||!e.GITHUB_REPO)throw new Error('GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO 설정이 필요합니다.');
   const owner=e.GITHUB_OWNER.trim(),repo=e.GITHUB_REPO.trim(),configured=(e.GITHUB_DISPATCH_MODE||'auto').trim();
   const workflow=(e.GITHUB_WORKFLOW_FILE||'analyze.yml').trim();
@@ -316,10 +351,10 @@ async function triggerGithub(e:Env,runId:number){
     let url:string,body:any;
     if(mode==='workflow_dispatch'){
       url=`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`;
-      body={ref:'main',inputs:{run_id:String(runId)}};
+      body={ref:'main',inputs:{run_id:String(runId),analysis_mode:analysisMode}};
     }else{
       url=`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/dispatches`;
-      body={event_type:'run-ergm',client_payload:{run_id:String(runId),base_url:e.PUBLIC_BASE_URL||'',analysis_mode:'both'}};
+      body={event_type:'run-ergm',client_payload:{run_id:String(runId),base_url:e.PUBLIC_BASE_URL||'',analysis_mode:analysisMode}};
     }
     const response=await fetch(url,{method:'POST',headers:githubHeaders(e),body:JSON.stringify(body)});
     const detail=await response.text();
@@ -503,12 +538,15 @@ async function temporalNetwork(e:Env,u:URL){
  const type=u.searchParams.get('type')||'win';
  const fromYear=Number(u.searchParams.get('fromYear')||new Date().getUTCFullYear()-Number(e.DATA_WINDOW_YEARS||4));
  const toYear=Number(u.searchParams.get('toYear')||new Date().getUTCFullYear());
- const rows=[] as any[];
- for(let y=fromYear;y<=toYear;y++){
-  const n=await network(e,new URL(`/api/network?from=${y}-01-01&to=${y}-12-31&type=${type}`,'https://local'));
+ const years:number[]=[];for(let y=fromYear;y<=toYear;y++)years.push(y);
+ // v28: 예전에는 연도마다 순차적으로 await했습니다(연도 수만큼 왕복 지연이 누적됨).
+ // 각 연도 조회는 서로 독립적이므로 Promise.all로 동시에 실행해 총 지연시간을 줄입니다.
+ const nets=await Promise.all(years.map(y=>network(e,new URL(`/api/network?from=${y}-01-01&to=${y}-12-31&type=${type}`,'https://local'))));
+ const rows=years.map((y,i)=>{
+  const n=nets[i];
   const nodeCount=n.nodes.length,edgeCount=n.links.length,maxEdges=type==='match'?nodeCount*(nodeCount-1)/2:nodeCount*(nodeCount-1);
-  rows.push({year:y,nodeCount,edgeCount,matchCount:n.meta.matches,density:maxEdges?Number((edgeCount/maxEdges).toFixed(6)):0,averageDegree:nodeCount?Number(((type==='match'?2:1)*edgeCount/nodeCount).toFixed(3)):0});
- }
+  return{year:y,nodeCount,edgeCount,matchCount:n.meta.matches,density:maxEdges?Number((edgeCount/maxEdges).toFixed(6)):0,averageDegree:nodeCount?Number(((type==='match'?2:1)*edgeCount/nodeCount).toFixed(3)):0};
+ });
  return{type,fromYear,toYear,series:rows,note:'연도별 반복단면 네트워크로 TERGM/STERGM 사전 준비에 활용하십시오.'}
 }
 async function graphExport(e:Env,u:URL,format:'graphml'|'gexf'){
@@ -548,9 +586,9 @@ async function systemHealth(e:Env){
   }
 }
 export default {
- async fetch(r:Request,e:Env){try{const u=new URL(r.url),p=u.pathname;if(p==='/api/health'){const h=await systemHealth(e);return j(h,h.ok?200:503)};if(p==='/api/provider')return j({provider:'free-open-sources-v11-fifa211',...cfg(e),progress:await progress(e),apiKeyRequired:false});if(p==='/api/provider/test'){const c=cfg(e),tests=[];for(const [name,url] of Object.entries(c)){if(typeof url!=='string'||!url.startsWith('http'))continue;try{const res=await fetch(url,{headers:{Range:'bytes=0-128'}});tests.push({name,url,ok:res.ok,status:res.status})}catch(x){tests.push({name,url,ok:false,error:String(x)})}}return j({ok:tests.every((x:any)=>x.ok),results:tests})}if(p==='/api/dashboard')return j(await dashboard(e));if(p==='/api/temporal-network')return j(await temporalNetwork(e,u));if(p==='/api/export/graphml')return await graphExport(e,u,'graphml');if(p==='/api/export/gexf')return await graphExport(e,u,'gexf');if(p==='/api/citation'){const f=u.searchParams.get('format')||'bibtex';return new Response(citationText(f),{headers:{'content-type':'text/plain;charset=utf-8','content-disposition':`attachment; filename="fifa-network-lab.${f==='ris'?'ris':f==='apa'?'txt':'bib'}"`}})}if(p==='/api/projects'&&r.method==='GET')return j(await listProjects(e));if(p==='/api/projects'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await createProject(r,e),201)}if(p==='/api/dataset-freeze'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;return j(await freezeDataset(e,b.name||'Research Dataset',b.projectId?Number(b.projectId):null),201)}if(p==='/api/reproducibility-report')return j(await reproducibilityReport(e));if(p==='/api/analytics')return j(await advancedAnalytics(e,u));if(p==='/api/gof-report'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);return j(await gofReport(e,id))}
+ async fetch(r:Request,e:Env){try{const u=new URL(r.url),p=u.pathname;if(p==='/api/health'){const h=await systemHealth(e);return j(h,h.ok?200:503)};if(p==='/api/provider')return j({provider:'free-open-sources-v11-fifa211',...cfg(e),progress:await progress(e),apiKeyRequired:false});if(p==='/api/provider/test'){const c=cfg(e),tests=[];for(const [name,url] of Object.entries(c)){if(typeof url!=='string'||!url.startsWith('http'))continue;try{const res=await fetch(url,{headers:{Range:'bytes=0-128'}});tests.push({name,url,ok:res.ok,status:res.status})}catch(x){tests.push({name,url,ok:false,error:String(x)})}}return j({ok:tests.every((x:any)=>x.ok),results:tests})}if(p==='/api/dashboard')return cachedJson(r,45,()=>dashboard(e));if(p==='/api/temporal-network')return cachedJson(r,120,()=>temporalNetwork(e,u));if(p==='/api/export/graphml')return await graphExport(e,u,'graphml');if(p==='/api/export/gexf')return await graphExport(e,u,'gexf');if(p==='/api/citation'){const f=u.searchParams.get('format')||'bibtex';return new Response(citationText(f),{headers:{'content-type':'text/plain;charset=utf-8','content-disposition':`attachment; filename="fifa-network-lab.${f==='ris'?'ris':f==='apa'?'txt':'bib'}"`}})}if(p==='/api/projects'&&r.method==='GET')return j(await listProjects(e));if(p==='/api/projects'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await createProject(r,e),201)}if(p==='/api/dataset-freeze'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;return j(await freezeDataset(e,b.name||'Research Dataset',b.projectId?Number(b.projectId):null),201)}if(p==='/api/reproducibility-report')return j(await reproducibilityReport(e));if(p==='/api/analytics')return cachedJson(r,45,()=>advancedAnalytics(e,u));if(p==='/api/gof-report'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);return j(await gofReport(e,id))}
 if(p==='/api/gof-report/export'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);const rep=await gofReport(e,id);if(!rep.ok||!rep.formula)return j(rep,404);return new Response(gofReportMarkdown(rep),{headers:{'content-type':'text/markdown;charset=utf-8','content-disposition':`attachment; filename="gof-report-run-${id}.md"`}})}
-if(p==='/api/period-comparison'){const type=u.searchParams.get('type')||'win',aFrom=u.searchParams.get('aFrom'),aTo=u.searchParams.get('aTo'),bFrom=u.searchParams.get('bFrom'),bTo=u.searchParams.get('bTo');if(!aFrom||!aTo||!bFrom||!bTo)return j({error:'aFrom, aTo, bFrom, bTo가 모두 필요합니다.'},400);return j(await periodComparison(e,type,aFrom,aTo,bFrom,bTo))}
+if(p==='/api/period-comparison'){const type=u.searchParams.get('type')||'win',aFrom=u.searchParams.get('aFrom'),aTo=u.searchParams.get('aTo'),bFrom=u.searchParams.get('bFrom'),bTo=u.searchParams.get('bTo');if(!aFrom||!aTo||!bFrom||!bTo)return j({error:'aFrom, aTo, bFrom, bTo가 모두 필요합니다.'},400);return cachedJson(r,60,()=>periodComparison(e,type,aFrom,aTo,bFrom,bTo))}
 if(p==='/api/model-comparison')return j(await modelComparison(e));if(p==='/api/reproducibility')return j(await reproducibilityPackage(e));if(p==='/api/interpret'){
   const id=Number(u.searchParams.get('id')||0);
   let x=id?await e.DB.prepare('SELECT * FROM model_runs WHERE id=?').bind(id).first<any>():await e.DB.prepare(`SELECT * FROM model_runs WHERE status='completed' ORDER BY id DESC LIMIT 1`).first<any>();
@@ -564,8 +602,8 @@ if(p==='/api/model-comparison')return j(await modelComparison(e));if(p==='/api/r
   }catch(err){
     return j({...deterministicInterpretation(x),aiGenerated:false,aiError:String(err).slice(0,400),runId:x.id})
   }
-};if(p==='/api/progress')return j(await progress(e));if(p==='/api/network')return j(await network(e,u));if(p==='/api/rankings'){const q=await e.DB.prepare(`WITH coverage AS (SELECT r.release_date,COUNT(DISTINCT r.team_id) covered FROM rankings r JOIN teams t ON t.id=r.team_id WHERE t.is_fifa_member=1 AND t.active=1 GROUP BY r.release_date), chosen AS (SELECT release_date,covered FROM coverage ORDER BY CASE WHEN covered>=190 THEN 1 ELSE 0 END DESC,CASE WHEN covered>=190 THEN release_date END DESC,covered DESC,release_date DESC LIMIT 1) SELECT r.release_date,r.rank,r.points,r.previous_rank,t.fifa_code,t.name_ko,t.name_en,t.confederation,c.covered snapshot_coverage FROM rankings r JOIN teams t ON t.id=r.team_id JOIN chosen c ON c.release_date=r.release_date WHERE t.is_fifa_member=1 AND t.active=1 ORDER BY r.rank,t.fifa_code LIMIT 211`).all();return j(q.results)}if(p==='/api/quality')return j(await quality(e));if(p==='/api/github/diagnostics')return j(await githubDiagnostics(e));if(p==='/api/model-validation'){return j(await modelValidation(e,u.searchParams.get('type')||'win'))};if(p==='/api/fifa-members'){const q=await e.DB.prepare('SELECT fifa_code,official_name,confederation,active FROM fifa_members ORDER BY confederation,official_name').all();return j({count:q.results.length,members:q.results})};if(p==='/api/fifa-status'){const x=await e.DB.prepare(`SELECT (SELECT COUNT(*) FROM fifa_members WHERE active=1) master,(SELECT COUNT(*) FROM teams WHERE is_fifa_member=1 AND active=1) activeMembers,(SELECT COUNT(*) FROM teams) rawTeams,(SELECT COUNT(*) FROM unmapped_team_names) unmapped`).first<any>();return j({...x,normalizedAt:await state(e,'fifa_normalized_at','')||null,ok:Number(x?.activeMembers||0)===211})};if(p==='/api/fifa-normalize'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await normalizeExistingData(e))};if(p==='/api/unmapped-teams'){const q=await e.DB.prepare('SELECT * FROM unmapped_team_names ORDER BY occurrence_count DESC,last_seen DESC LIMIT 500').all();return j(q.results)};if(p==='/api/collect'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;return j(await collectOne(e,Boolean(b.reset)))}if(p==='/api/collect-live-ranking'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await taskLiveRanking(e))}if(p==='/api/import'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await importRows(r,e))}if(p==='/api/export'){const [t,m,rr]=await Promise.all([e.DB.prepare('SELECT * FROM teams WHERE is_fifa_member=1 AND active=1').all(),e.DB.prepare('SELECT m.* FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1').all(),e.DB.prepare('SELECT r.* FROM rankings r JOIN teams t ON t.id=r.team_id WHERE t.is_fifa_member=1 AND t.active=1').all()]);return j({metadata:{generated_at:new Date().toISOString(),version:VERSION,sources:cfg(e),progress:await progress(e)},teams:t.results,matches:m.results,rankings:rr.results})}if(p==='/api/models'&&r.method==='GET'){const id=Number(u.searchParams.get('id')||0);if(id){const x=await e.DB.prepare('SELECT * FROM model_runs WHERE id=?').bind(id).first<any>();return x?j(x):j({error:'model run not found'},404)}const q=await e.DB.prepare('SELECT * FROM model_runs ORDER BY id DESC LIMIT 50').all();return j(q.results)}
-if(p==='/api/models'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json() as any,networkType=b.networkType||'win',validation=await modelValidation(e,networkType);if(!validation.ok)return j({ok:false,status:'validation_failed',error:'ERGM 실행 전 데이터 검증에 실패했습니다.',validation},422);const x=await e.DB.prepare(`INSERT INTO model_runs(model_name,network_type,formula,status,diagnostics_json) VALUES(?,?,?,'queued',?) RETURNING id`).bind(b.name||'ERGM',networkType,b.formula||'network ~ edges',JSON.stringify({preflight:validation})).first<any>();if(!x?.id)return j({error:'모형 요청 저장 실패'},500);try{const dispatch=await triggerGithub(e,x.id);await e.DB.prepare(`UPDATE model_runs SET status='dispatched' WHERE id=?`).bind(x.id).run();return j({ok:true,runId:x.id,status:'dispatched',note:'사전검증을 통과하여 GitHub Actions R 분석을 요청했습니다.',dispatch,validation})}catch(err){await e.DB.prepare(`UPDATE model_runs SET status='dispatch_failed',diagnostics_json=? WHERE id=?`).bind(JSON.stringify({preflight:validation,error:String(err)}),x.id).run();return j({ok:false,runId:x.id,status:'dispatch_failed',error:err instanceof Error?err.message:String(err),validation},502)}}
+};if(p==='/api/progress')return j(await progress(e));if(p==='/api/network')return cachedJson(r,45,()=>network(e,u));if(p==='/api/rankings'){const q=await e.DB.prepare(`WITH coverage AS (SELECT r.release_date,COUNT(DISTINCT r.team_id) covered FROM rankings r JOIN teams t ON t.id=r.team_id WHERE t.is_fifa_member=1 AND t.active=1 GROUP BY r.release_date), chosen AS (SELECT release_date,covered FROM coverage ORDER BY CASE WHEN covered>=190 THEN 1 ELSE 0 END DESC,CASE WHEN covered>=190 THEN release_date END DESC,covered DESC,release_date DESC LIMIT 1) SELECT r.release_date,r.rank,r.points,r.previous_rank,t.fifa_code,t.name_ko,t.name_en,t.confederation,c.covered snapshot_coverage FROM rankings r JOIN teams t ON t.id=r.team_id JOIN chosen c ON c.release_date=r.release_date WHERE t.is_fifa_member=1 AND t.active=1 ORDER BY r.rank,t.fifa_code LIMIT 211`).all();return j(q.results)}if(p==='/api/quality')return cachedJson(r,30,()=>quality(e));if(p==='/api/github/diagnostics')return j(await githubDiagnostics(e));if(p==='/api/model-validation'){return j(await modelValidation(e,u.searchParams.get('type')||'win'))};if(p==='/api/fifa-members'){const q=await e.DB.prepare('SELECT fifa_code,official_name,confederation,active FROM fifa_members ORDER BY confederation,official_name').all();return j({count:q.results.length,members:q.results})};if(p==='/api/fifa-status'){const x=await e.DB.prepare(`SELECT (SELECT COUNT(*) FROM fifa_members WHERE active=1) master,(SELECT COUNT(*) FROM teams WHERE is_fifa_member=1 AND active=1) activeMembers,(SELECT COUNT(*) FROM teams) rawTeams,(SELECT COUNT(*) FROM unmapped_team_names) unmapped`).first<any>();return j({...x,normalizedAt:await state(e,'fifa_normalized_at','')||null,ok:Number(x?.activeMembers||0)===211})};if(p==='/api/fifa-normalize'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const result=await normalizeExistingData(e);await purgeDashboardCache(r.url);return j(result)};if(p==='/api/unmapped-teams'){const q=await e.DB.prepare('SELECT * FROM unmapped_team_names ORDER BY occurrence_count DESC,last_seen DESC LIMIT 500').all();return j(q.results)};if(p==='/api/collect'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;const result=await collectOne(e,Boolean(b.reset));await purgeDashboardCache(r.url);return j(result)}if(p==='/api/collect-live-ranking'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const result=await taskLiveRanking(e);await purgeDashboardCache(r.url);return j(result)}if(p==='/api/import'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const result=await importRows(r,e);await purgeDashboardCache(r.url);return j(result)}if(p==='/api/export'){const [t,m,rr]=await Promise.all([e.DB.prepare('SELECT * FROM teams WHERE is_fifa_member=1 AND active=1').all(),e.DB.prepare('SELECT m.* FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1').all(),e.DB.prepare('SELECT r.* FROM rankings r JOIN teams t ON t.id=r.team_id WHERE t.is_fifa_member=1 AND t.active=1').all()]);return j({metadata:{generated_at:new Date().toISOString(),version:VERSION,sources:cfg(e),progress:await progress(e)},teams:t.results,matches:m.results,rankings:rr.results})}if(p==='/api/models'&&r.method==='GET'){const id=Number(u.searchParams.get('id')||0);if(id){const x=await e.DB.prepare('SELECT * FROM model_runs WHERE id=?').bind(id).first<any>();return x?j(x):j({error:'model run not found'},404)}const q=await e.DB.prepare('SELECT * FROM model_runs ORDER BY id DESC LIMIT 50').all();return j(q.results)}
+if(p==='/api/models'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json() as any,networkType=b.networkType||'win',validation=await modelValidation(e,networkType),analysisMode=(['ergm','tergm','both'].includes(b.analysisMode)?b.analysisMode:'both') as 'both'|'ergm'|'tergm';if(!validation.ok)return j({ok:false,status:'validation_failed',error:'ERGM 실행 전 데이터 검증에 실패했습니다.',validation},422);const x=await e.DB.prepare(`INSERT INTO model_runs(model_name,network_type,formula,status,diagnostics_json) VALUES(?,?,?,'queued',?) RETURNING id`).bind(b.name||'ERGM',networkType,b.formula||'network ~ edges',JSON.stringify({preflight:validation,analysisMode})).first<any>();if(!x?.id)return j({error:'모형 요청 저장 실패'},500);try{const dispatch=await triggerGithub(e,x.id,analysisMode);await e.DB.prepare(`UPDATE model_runs SET status='dispatched' WHERE id=?`).bind(x.id).run();return j({ok:true,runId:x.id,status:'dispatched',analysisMode,note:`사전검증을 통과하여 GitHub Actions R 분석(${analysisMode})을 요청했습니다.`,dispatch,validation})}catch(err){await e.DB.prepare(`UPDATE model_runs SET status='dispatch_failed',diagnostics_json=? WHERE id=?`).bind(JSON.stringify({preflight:validation,analysisMode,error:String(err)}),x.id).run();return j({ok:false,runId:x.id,status:'dispatch_failed',error:err instanceof Error?err.message:String(err),validation},502)}}
 if(p==='/api/model-input'&&r.method==='GET'){if(!analysisAuth(r,e))return j({error:'unauthorized'},401);const runId=Number(u.searchParams.get('run_id'));const run=await e.DB.prepare('SELECT * FROM model_runs WHERE id=?').bind(runId).first<any>();if(!run)return j({error:'model run not found'},404);await e.DB.prepare(`UPDATE model_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=?`).bind(runId).run();const [teams,matches,rankings]=await Promise.all([e.DB.prepare('SELECT * FROM teams WHERE is_fifa_member=1 AND active=1 ORDER BY id').all(),e.DB.prepare('SELECT m.* FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1 ORDER BY m.match_date,m.id').all(),e.DB.prepare('SELECT r.* FROM rankings r JOIN (SELECT team_id,MAX(release_date) d FROM rankings GROUP BY team_id) z ON z.team_id=r.team_id AND z.d=r.release_date JOIN teams t ON t.id=r.team_id WHERE t.is_fifa_member=1 AND t.active=1').all()]);return j({run,teams:teams.results,matches:matches.results,rankings:rankings.results,validation:await modelValidation(e,run.network_type),metadata:{version:VERSION,generated_at:new Date().toISOString()}})}
 if(p==='/api/model-github-run'&&r.method==='POST'){if(!analysisAuth(r,e))return j({error:'unauthorized'},401);const b=await r.json() as any,runId=Number(b.run_id);if(!runId)return j({error:'run_id required'},400);await e.DB.prepare(`UPDATE model_runs SET github_run_id=?,github_run_url=? WHERE id=?`).bind(String(b.github_run_id||''),String(b.github_run_url||''),runId).run();return j({ok:true,runId})}
 if(p==='/api/github/run-progress'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);return j(await githubRunProgress(e,id))}

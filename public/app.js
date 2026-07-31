@@ -16,7 +16,7 @@ async function init(){
   if(qr.status==='fulfilled')renderQuality(qr.value);else $('#quality').textContent='품질정보를 불러오지 못했습니다.';
   if(rr.status==='fulfilled'){const rows=Array.isArray(rr.value)?rr.value:[];const snapshot=rows[0];$('#rankingList').innerHTML=(snapshot?`<small class="muted">발표일 ${snapshot.release_date} · ${snapshot.snapshot_coverage||rows.length}개국 기준</small>`:'')+rows.slice(0,8).map(x=>`<div><b>${x.rank}</b> ${x.name_ko||x.name_en||x.fifa_code} <span class="pill">${Number(x.points||0).toFixed(1)}</span></div>`).join('')||'데이터 없음'}
   else $('#rankingList').textContent='랭킹 정보를 불러오지 못했습니다.';
-  if(nr.status==='fulfilled')draw(nr.value,'networkCanvas');else draw({nodes:[],links:[]},'networkCanvas');
+  if(nr.status==='fulfilled'){window.__lastHomeNetwork=nr.value;draw(nr.value,'networkCanvas')}else draw({nodes:[],links:[]},'networkCanvas');
   autoSourceCheck();
 }
 function renderQuality(q){
@@ -147,8 +147,12 @@ function renderGithubStepProgress(d){
   if(!d||!d.ok){box.style.display='block';box.innerHTML=`<b>GitHub 진행 상황</b><p class="warn">${d?.error||'조회할 수 없습니다.'}</p>`;return}
   if(!d.steps||!d.steps.length){box.style.display='block';box.innerHTML=`<b>GitHub 진행 상황</b><p>${d.note||'대기 중입니다...'}</p>`;return}
   box.style.display='block';
-  const rows=d.steps.map(s=>`<li>${stepIcon(s)} ${s.label}</li>`).join('');
-  box.innerHTML=`<b>GitHub 진행 상황</b>${d.runUrl?` · <a href="${d.runUrl}" target="_blank" rel="noopener">Actions에서 보기</a>`:''}<ul class="step-list">${rows}</ul>`;
+  // v29: analyze.yml이 여러 job(report-run/static-ergm/temporal-tergm/manifest)으로
+  // 나뉘어 정적·시간적 모형이 병렬 실행되므로, job별로 묶어서 표시합니다.
+  const byJob=new Map();
+  for(const s of d.steps){const key=s.jobLabel||s.job||'';if(!byJob.has(key))byJob.set(key,[]);byJob.get(key).push(s)}
+  const groups=[...byJob.entries()].map(([job,steps])=>`<div style="margin-top:8px"><b style="font-size:12px;color:#8fc9ff">${job}</b><ul class="step-list">${steps.map(s=>`<li>${stepIcon(s)} ${s.label}</li>`).join('')}</ul></div>`).join('');
+  box.innerHTML=`<b>GitHub 진행 상황</b>${d.runUrl?` · <a href="${d.runUrl}" target="_blank" rel="noopener">Actions에서 보기</a>`:''}${groups}`;
 }
 let githubPollTimer=null;
 function stopGithubPoll(){if(githubPollTimer){clearInterval(githubPollTimer);githubPollTimer=null}}
@@ -166,7 +170,7 @@ function startGithubPoll(runId){
   tick();
   githubPollTimer=setInterval(tick,8000);
 }
-$('#runModel').onclick=async()=>{try{const d=await api('/api/models',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#modelName').value,networkType:$('#modelNetwork').value,formula:formula()})});$('#runLookup').value=d.runId;$('#modelResult').innerHTML=`실행번호 <b>#${d.runId}</b> · ${d.status}<br>${d.note}`;renderValidation(d.validation);$('#modelDetail').textContent=JSON.stringify(d,null,2);if(d.runId)startGithubPoll(d.runId);init()}catch(e){$('#modelDetail').textContent=e.message}};
+$('#runModel').onclick=async()=>{try{const d=await api('/api/models',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#modelName').value,networkType:$('#modelNetwork').value,formula:formula(),analysisMode:$('#analysisMode').value})});$('#runLookup').value=d.runId;$('#modelResult').innerHTML=`실행번호 <b>#${d.runId}</b> · ${d.status}<br>${d.note}`;renderValidation(d.validation);$('#modelDetail').textContent=JSON.stringify(d,null,2);if(d.runId)startGithubPoll(d.runId);init()}catch(e){$('#modelDetail').textContent=e.message}};
 $('#checkModel').onclick=async()=>{const id=$('#runLookup').value;if(!id)return alert('실행번호를 입력하세요');try{const d=await api(`/api/models?id=${id}`);$('#modelResult').innerHTML=`실행번호 <b>#${d.id}</b> · ${d.status}`;$('#modelDetail').textContent=JSON.stringify(d,null,2);if(d.status==='completed'||d.status==='failed'){stopGithubPoll();const p=await api(`/api/github/run-progress?id=${id}`);renderGithubStepProgress(p)}else{startGithubPoll(id)}}catch(e){$('#modelDetail').textContent=e.message}};
 
 let githubDiagLoaded=false;
@@ -191,10 +195,24 @@ function draw(data,canvasId){
 }
 async function drawExplorer(){
   const from=$('#from').value,to=$('#to').value,type=$('#networkType').value;const btn=$('#drawBtn');btn.disabled=true;btn.textContent='생성 중...';
-  try{const d=await api(`/api/network?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&type=${encodeURIComponent(type)}`);draw(d,'networkCanvas2');$('#netStats').innerHTML=`노드 <b>${d.nodes.length}</b> · 엣지 <b>${d.links.length}</b> · 원자료 경기 <b>${d.meta.matches}</b> · 고립 노드 <b>${d.meta.isolateCount||0}</b>`}catch(e){$('#netStats').textContent=e.message}finally{btn.disabled=false;btn.textContent='그래프 생성'}
+  try{const d=await api(`/api/network?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&type=${encodeURIComponent(type)}`);window.__lastExplorerNetwork=d;draw(d,'networkCanvas2');$('#netStats').innerHTML=`노드 <b>${d.nodes.length}</b> · 엣지 <b>${d.links.length}</b> · 원자료 경기 <b>${d.meta.matches}</b> · 고립 노드 <b>${d.meta.isolateCount||0}</b>`}catch(e){$('#netStats').textContent=e.message}finally{btn.disabled=false;btn.textContent='그래프 생성'}
 }
 $('#drawBtn').onclick=drawExplorer;
-window.addEventListener('resize',()=>{clearTimeout(window.__graphResize);window.__graphResize=setTimeout(()=>{init();if($('#network').classList.contains('active'))drawExplorer()},180)});
+window.addEventListener('resize',()=>{
+  clearTimeout(window.__graphResize);
+  window.__graphResize=setTimeout(()=>{
+    // v28: 창 크기 변경(모바일 키보드 열림/닫힘 포함)은 캔버스만 다시 그리면 충분합니다.
+    // 예전에는 여기서 init()을 호출해 대시보드·품질·랭킹·네트워크 4~5개 API를 매번 다시
+    // 불러왔는데, 텍스트 입력 시 키보드가 뜨고 닫힐 때마다 리사이즈 이벤트가 발생하는
+    // 모바일에서는 그때마다 전체 페이지가 새로고침되는 것 같은 체감 지연을 유발했습니다.
+    if(window.__lastHomeNetwork)draw(window.__lastHomeNetwork,'networkCanvas');
+    else init();
+    if($('#network').classList.contains('active')){
+      if(window.__lastExplorerNetwork)draw(window.__lastExplorerNetwork,'networkCanvas2');
+      else drawExplorer();
+    }
+  },180)
+});
 
 document.addEventListener('DOMContentLoaded',()=>{init();setTimeout(autoGithubDiagnostic,300)});
 
