@@ -344,6 +344,56 @@ async function advancedAnalytics(e:Env,u:URL){
   const conf:any={};for(const r of rows){conf[r.confederation]??={nodes:0,totalDegree:0};conf[r.confederation].nodes++;conf[r.confederation].totalDegree+=r.totalDegree}
   return{meta:{from,to,type,nodeCount:nodes.length,edgeCount:links.length,communities:cid},top:rows.slice(0,25),all:rows,confederations:Object.entries(conf).map(([name,v]:any)=>({name,...v,averageDegree:Number((v.totalDegree/v.nodes).toFixed(2))}))}
 }
+async function gofReport(e:Env,runId:number){
+  const x=await e.DB.prepare('SELECT * FROM model_runs WHERE id=?').bind(runId).first<any>();
+  if(!x)return{ok:false,error:'해당 실행번호의 모형을 찾을 수 없습니다.'};
+  let result:any={},diag:any={};
+  try{result=JSON.parse(x.result_json||'{}')}catch{}
+  try{diag=JSON.parse(x.diagnostics_json||'{}')}catch{}
+  if(x.status!=='completed')return{ok:true,runId:x.id,status:x.status,note:'모형이 아직 완료되지 않아 GOF 리포트를 생성할 수 없습니다. GitHub Actions 완료 후 다시 조회하십시오.'};
+  const gofText=Array.isArray(diag.gof)?diag.gof:(diag.gof&&typeof diag.gof==='object'?[`(GOF 생략됨: ${diag.gof.reason||'사유 미상'})`]:[]);
+  const mcmcNote=typeof diag.mcmc_diagnostics==='string'?null:(diag.mcmc_diagnostics?.reason||null);
+  return{
+    ok:true,runId:x.id,status:x.status,
+    modelName:x.model_name,networkType:x.network_type,
+    formula:result.formula||x.formula,requestedFormula:result.requested_formula||null,
+    fallbackUsed:Boolean(result.fallback_used),
+    converged:Boolean(result.converged??x.converged),
+    aic:x.aic??result.aic??null,bic:x.bic??result.bic??null,
+    nodeCount:result.node_count??null,edgeCount:result.edge_count??null,
+    inputCounts:result.input_counts||null,
+    mcmcUsed:result.mcmc_used!==false,gofAvailable:result.gof_available!==false,
+    coefficients:result.coefficients||[],
+    gofText,mcmcDiagnosticsNote:mcmcNote,
+    createdAt:x.created_at,finishedAt:x.finished_at,generatedAt:new Date().toISOString()
+  }
+}
+function gofReportMarkdown(r:any):string{
+  const coefRows=(r.coefficients||[]).map((c:any)=>`| ${c.term} | ${Number(c.estimate).toFixed(4)} | ${Number(c.std_error).toFixed(4)} | ${Number(c.p_value).toFixed(4)} | ${Number(c.odds_ratio).toFixed(3)} |`).join('\n');
+  return `# GOF·모형 적합도 리포트 — 실행번호 #${r.runId}\n\n생성일시: ${r.generatedAt}\n\n## 모형 개요\n\n- 모형명: ${r.modelName||'-'}\n- 네트워크 종류: ${r.networkType||'-'}\n- 사용된 공식: \`${r.formula||'-'}\`${r.fallbackUsed?` (요청식 \`${r.requestedFormula}\`이 수렴하지 않아 자동 단순화됨)`:''}\n- 수렴 여부: ${r.converged?'수렴':'미수렴/확인 필요'}\n- AIC: ${r.aic??'-'} · BIC: ${r.bic??'-'}\n- 노드/엣지 수: ${r.nodeCount??'-'} / ${r.edgeCount??'-'}\n- 입력 데이터: 팀 ${r.inputCounts?.teams??'-'}개, 경기 ${r.inputCounts?.matches??'-'}건, 랭킹 ${r.inputCounts?.rankings??'-'}건\n- MCMC 사용 여부: ${r.mcmcUsed?'예 (dyad-dependent 항 포함)':'아니오 (dyad-independent, MPLE로 직접 추정)'}\n- GOF 계산 가능 여부: ${r.gofAvailable?'예':'아니오'}\n\n## 계수 추정치\n\n| 항 | Estimate | SE | p-value | Odds Ratio |\n|---|---|---|---|---|\n${coefRows||'| (계수 없음) | | | | |'}\n\n## GOF(적합도) 원본 출력\n\n\`\`\`\n${(r.gofText||[]).join('\n')||'(GOF 출력 없음)'}\n\`\`\`\n${r.mcmcDiagnosticsNote?`\n## MCMC 진단 참고\n\n${r.mcmcDiagnosticsNote}\n`:''}\n---\n*이 리포트는 FIFA Network Lab에서 자동 생성되었습니다. 논문에 인용 시 위 계수·적합도 수치를 연구자가 직접 검토한 뒤 보고하십시오.*\n`;
+}
+async function periodComparison(e:Env,type:string,aFrom:string,aTo:string,bFrom:string,bTo:string){
+  const [a,b]=await Promise.all([
+    advancedAnalytics(e,new URL(`https://local/api/analytics?from=${aFrom}&to=${aTo}&type=${type}`)),
+    advancedAnalytics(e,new URL(`https://local/api/analytics?from=${bFrom}&to=${bTo}&type=${type}`))
+  ]);
+  const summarize=(x:any)=>{
+    const n=x.meta.nodeCount,m=x.meta.edgeCount;
+    const activeNodes=x.all.filter((r:any)=>r.totalDegree>0).length;
+    const density=n>1?(2*m)/(n*(n-1)):0;
+    const avgDegree=n?x.all.reduce((s:number,r:any)=>s+r.totalDegree,0)/n:0;
+    return{from:x.meta.from,to:x.meta.to,nodeCount:n,edgeCount:m,activeNodes,isolateCount:n-activeNodes,density:Number(density.toFixed(4)),avgDegree:Number(avgDegree.toFixed(2)),communities:x.meta.communities,topByPageRank:x.top.slice(0,10).map((r:any)=>({code:r.code,name:r.name,pageRank:r.pageRank,totalDegree:r.totalDegree})),confederations:x.confederations}
+  };
+  const sa=summarize(a),sb=summarize(b);
+  const rankA=new Map(a.all.map((r:any,i:number)=>[r.code,i+1])),rankB=new Map(b.all.map((r:any,i:number)=>[r.code,i+1]));
+  const names=new Map([...a.all,...b.all].map((r:any)=>[r.code,r.name]));
+  const movers=[...new Set([...rankA.keys(),...rankB.keys()])]
+    .map((code:any)=>{const ra=rankA.get(code),rb=rankB.get(code);return{code,name:names.get(code)||code,rankA:ra??null,rankB:rb??null,delta:(ra!==undefined&&rb!==undefined)?ra-rb:null}})
+    .filter((m:any)=>m.delta!==null)
+    .sort((x:any,y:any)=>Math.abs(y.delta)-Math.abs(x.delta))
+    .slice(0,15);
+  return{ok:true,type,periodA:sa,periodB:sb,delta:{nodeCount:sb.nodeCount-sa.nodeCount,edgeCount:sb.edgeCount-sa.edgeCount,density:Number((sb.density-sa.density).toFixed(4)),avgDegree:Number((sb.avgDegree-sa.avgDegree).toFixed(2))},topMovers:movers}
+}
 async function modelComparison(e:Env){
   const q=await e.DB.prepare(`SELECT id,model_name,network_type,formula,status,aic,bic,converged,created_at,finished_at,result_json,diagnostics_json FROM model_runs ORDER BY id DESC LIMIT 100`).all<any>();
   const rows=q.results.map((x:any)=>{let result:any={},diag:any={};try{result=JSON.parse(x.result_json||'{}')}catch{}try{diag=JSON.parse(x.diagnostics_json||'{}')}catch{}return{id:x.id,name:x.model_name,networkType:x.network_type,formula:x.formula,status:x.status,aic:x.aic,bic:x.bic,converged:Boolean(x.converged),createdAt:x.created_at,finishedAt:x.finished_at,fallbackUsed:Boolean(result.fallback_used),usedFormula:result.used_formula||x.formula,error:diag.error||null}});
@@ -498,7 +548,10 @@ async function systemHealth(e:Env){
   }
 }
 export default {
- async fetch(r:Request,e:Env){try{const u=new URL(r.url),p=u.pathname;if(p==='/api/health'){const h=await systemHealth(e);return j(h,h.ok?200:503)};if(p==='/api/provider')return j({provider:'free-open-sources-v11-fifa211',...cfg(e),progress:await progress(e),apiKeyRequired:false});if(p==='/api/provider/test'){const c=cfg(e),tests=[];for(const [name,url] of Object.entries(c)){if(typeof url!=='string'||!url.startsWith('http'))continue;try{const res=await fetch(url,{headers:{Range:'bytes=0-128'}});tests.push({name,url,ok:res.ok,status:res.status})}catch(x){tests.push({name,url,ok:false,error:String(x)})}}return j({ok:tests.every((x:any)=>x.ok),results:tests})}if(p==='/api/dashboard')return j(await dashboard(e));if(p==='/api/temporal-network')return j(await temporalNetwork(e,u));if(p==='/api/export/graphml')return await graphExport(e,u,'graphml');if(p==='/api/export/gexf')return await graphExport(e,u,'gexf');if(p==='/api/citation'){const f=u.searchParams.get('format')||'bibtex';return new Response(citationText(f),{headers:{'content-type':'text/plain;charset=utf-8','content-disposition':`attachment; filename="fifa-network-lab.${f==='ris'?'ris':f==='apa'?'txt':'bib'}"`}})}if(p==='/api/projects'&&r.method==='GET')return j(await listProjects(e));if(p==='/api/projects'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await createProject(r,e),201)}if(p==='/api/dataset-freeze'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;return j(await freezeDataset(e,b.name||'Research Dataset',b.projectId?Number(b.projectId):null),201)}if(p==='/api/reproducibility-report')return j(await reproducibilityReport(e));if(p==='/api/analytics')return j(await advancedAnalytics(e,u));if(p==='/api/model-comparison')return j(await modelComparison(e));if(p==='/api/reproducibility')return j(await reproducibilityPackage(e));if(p==='/api/interpret'){
+ async fetch(r:Request,e:Env){try{const u=new URL(r.url),p=u.pathname;if(p==='/api/health'){const h=await systemHealth(e);return j(h,h.ok?200:503)};if(p==='/api/provider')return j({provider:'free-open-sources-v11-fifa211',...cfg(e),progress:await progress(e),apiKeyRequired:false});if(p==='/api/provider/test'){const c=cfg(e),tests=[];for(const [name,url] of Object.entries(c)){if(typeof url!=='string'||!url.startsWith('http'))continue;try{const res=await fetch(url,{headers:{Range:'bytes=0-128'}});tests.push({name,url,ok:res.ok,status:res.status})}catch(x){tests.push({name,url,ok:false,error:String(x)})}}return j({ok:tests.every((x:any)=>x.ok),results:tests})}if(p==='/api/dashboard')return j(await dashboard(e));if(p==='/api/temporal-network')return j(await temporalNetwork(e,u));if(p==='/api/export/graphml')return await graphExport(e,u,'graphml');if(p==='/api/export/gexf')return await graphExport(e,u,'gexf');if(p==='/api/citation'){const f=u.searchParams.get('format')||'bibtex';return new Response(citationText(f),{headers:{'content-type':'text/plain;charset=utf-8','content-disposition':`attachment; filename="fifa-network-lab.${f==='ris'?'ris':f==='apa'?'txt':'bib'}"`}})}if(p==='/api/projects'&&r.method==='GET')return j(await listProjects(e));if(p==='/api/projects'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await createProject(r,e),201)}if(p==='/api/dataset-freeze'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;return j(await freezeDataset(e,b.name||'Research Dataset',b.projectId?Number(b.projectId):null),201)}if(p==='/api/reproducibility-report')return j(await reproducibilityReport(e));if(p==='/api/analytics')return j(await advancedAnalytics(e,u));if(p==='/api/gof-report'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);return j(await gofReport(e,id))}
+if(p==='/api/gof-report/export'){const id=Number(u.searchParams.get('id')||0);if(!id)return j({error:'id required'},400);const rep=await gofReport(e,id);if(!rep.ok||!rep.formula)return j(rep,404);return new Response(gofReportMarkdown(rep),{headers:{'content-type':'text/markdown;charset=utf-8','content-disposition':`attachment; filename="gof-report-run-${id}.md"`}})}
+if(p==='/api/period-comparison'){const type=u.searchParams.get('type')||'win',aFrom=u.searchParams.get('aFrom'),aTo=u.searchParams.get('aTo'),bFrom=u.searchParams.get('bFrom'),bTo=u.searchParams.get('bTo');if(!aFrom||!aTo||!bFrom||!bTo)return j({error:'aFrom, aTo, bFrom, bTo가 모두 필요합니다.'},400);return j(await periodComparison(e,type,aFrom,aTo,bFrom,bTo))}
+if(p==='/api/model-comparison')return j(await modelComparison(e));if(p==='/api/reproducibility')return j(await reproducibilityPackage(e));if(p==='/api/interpret'){
   const id=Number(u.searchParams.get('id')||0);
   let x=id?await e.DB.prepare('SELECT * FROM model_runs WHERE id=?').bind(id).first<any>():await e.DB.prepare(`SELECT * FROM model_runs WHERE status='completed' ORDER BY id DESC LIMIT 1`).first<any>();
   if(!x&&!id)x=await e.DB.prepare('SELECT * FROM model_runs ORDER BY id DESC LIMIT 1').first<any>();
