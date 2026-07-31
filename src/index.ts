@@ -381,23 +381,31 @@ ${coefs}
 {"headline":"결과를 한 문장으로 요약(한국어, 30자 내외)","summary":"전체 결과를 설명하는 한국어 3~5문장 요약","coefficient_notes":["계수별 해석을 담은 한국어 문장들"],"cautions":["통계적으로 유의해야 할 주의사항들(한국어)"]}`;
 }
 function extractJsonObject(text:string):any{
+  const snippet=(t:string)=>t.slice(0,180).replace(/\s+/g,' ').trim();
   const match=text.match(/\{[\s\S]*\}/);
-  if(!match)throw new Error('AI 응답에서 JSON 객체를 찾지 못했습니다');
-  return JSON.parse(match[0]);
+  if(!match)throw new Error(`AI 응답에서 JSON 객체를 찾지 못했습니다. 원본 응답(앞부분): "${snippet(text)||'(빈 응답)'}"`);
+  try{return JSON.parse(match[0])}
+  catch(err){throw new Error(`AI가 반환한 JSON을 파싱하지 못했습니다: ${String(err).slice(0,100)}. 원본 조각: "${snippet(match[0])}"`)}
 }
 async function aiInterpretation(e:Env,model:any){
   const modelId=e.WORKERS_AI_MODEL||DEFAULT_AI_MODEL;
   const prompt=buildInterpretPrompt(model);
-  const res:any=await e.AI.run(modelId,{
-    messages:[
-      {role:'system',content:'당신은 통계 네트워크 분석(ERGM) 전문가이며, 응답은 반드시 요청된 JSON 스키마 그대로만 출력합니다. 스키마 밖의 텍스트는 절대 포함하지 않습니다.'},
-      {role:'user',content:prompt}
-    ],
-    max_tokens:900
-  });
-  const raw=String(res?.response??res?.result?.response??(typeof res==='string'?res:JSON.stringify(res||'')));
+  let res:any;
+  try{
+    res=await e.AI.run(modelId,{
+      messages:[
+        {role:'system',content:'당신은 통계 네트워크 분석(ERGM) 전문가이며, 응답은 반드시 요청된 JSON 스키마 그대로만 출력합니다. 스키마 밖의 텍스트는 절대 포함하지 않습니다.'},
+        {role:'user',content:prompt}
+      ],
+      max_tokens:900
+    });
+  }catch(err){
+    throw new Error(`Workers AI 호출 자체가 실패했습니다(모델: ${modelId}): ${String(err).slice(0,180)}`);
+  }
+  const raw=String(res?.response??res?.result?.response??(typeof res==='string'?res:JSON.stringify(res??'')));
+  if(!raw.trim())throw new Error(`AI가 빈 응답을 반환했습니다(모델: ${modelId}). 원본 응답 구조: ${JSON.stringify(res).slice(0,180)}`);
   const parsed=extractJsonObject(raw);
-  if(!parsed.headline||!parsed.summary)throw new Error('AI 응답 스키마가 불완전합니다(headline/summary 누락)');
+  if(!parsed.headline||!parsed.summary)throw new Error(`AI 응답 스키마가 불완전합니다(headline/summary 누락). 원본: "${raw.slice(0,180).replace(/\s+/g,' ').trim()}"`);
   return{
     headline:String(parsed.headline).slice(0,120),
     status:'completed',
@@ -485,7 +493,7 @@ export default {
   try{
     return j({...await aiInterpretation(e,merged),runId:x.id})
   }catch(err){
-    return j({...deterministicInterpretation(x),aiGenerated:false,aiError:String(err).slice(0,200),runId:x.id})
+    return j({...deterministicInterpretation(x),aiGenerated:false,aiError:String(err).slice(0,400),runId:x.id})
   }
 };if(p==='/api/progress')return j(await progress(e));if(p==='/api/network')return j(await network(e,u));if(p==='/api/rankings'){const q=await e.DB.prepare(`WITH coverage AS (SELECT r.release_date,COUNT(DISTINCT r.team_id) covered FROM rankings r JOIN teams t ON t.id=r.team_id WHERE t.is_fifa_member=1 AND t.active=1 GROUP BY r.release_date), chosen AS (SELECT release_date,covered FROM coverage ORDER BY CASE WHEN covered>=190 THEN 1 ELSE 0 END DESC,CASE WHEN covered>=190 THEN release_date END DESC,covered DESC,release_date DESC LIMIT 1) SELECT r.release_date,r.rank,r.points,r.previous_rank,t.fifa_code,t.name_ko,t.name_en,t.confederation,c.covered snapshot_coverage FROM rankings r JOIN teams t ON t.id=r.team_id JOIN chosen c ON c.release_date=r.release_date WHERE t.is_fifa_member=1 AND t.active=1 ORDER BY r.rank,t.fifa_code LIMIT 211`).all();return j(q.results)}if(p==='/api/quality')return j(await quality(e));if(p==='/api/github/diagnostics')return j(await githubDiagnostics(e));if(p==='/api/model-validation'){return j(await modelValidation(e,u.searchParams.get('type')||'win'))};if(p==='/api/fifa-members'){const q=await e.DB.prepare('SELECT fifa_code,official_name,confederation,active FROM fifa_members ORDER BY confederation,official_name').all();return j({count:q.results.length,members:q.results})};if(p==='/api/fifa-status'){const x=await e.DB.prepare(`SELECT (SELECT COUNT(*) FROM fifa_members WHERE active=1) master,(SELECT COUNT(*) FROM teams WHERE is_fifa_member=1 AND active=1) activeMembers,(SELECT COUNT(*) FROM teams) rawTeams,(SELECT COUNT(*) FROM unmapped_team_names) unmapped`).first<any>();return j({...x,normalizedAt:await state(e,'fifa_normalized_at','')||null,ok:Number(x?.activeMembers||0)===211})};if(p==='/api/fifa-normalize'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await normalizeExistingData(e))};if(p==='/api/unmapped-teams'){const q=await e.DB.prepare('SELECT * FROM unmapped_team_names ORDER BY occurrence_count DESC,last_seen DESC LIMIT 500').all();return j(q.results)};if(p==='/api/collect'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json().catch(()=>({})) as any;return j(await collectOne(e,Boolean(b.reset)))}if(p==='/api/collect-live-ranking'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await taskLiveRanking(e))}if(p==='/api/import'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);return j(await importRows(r,e))}if(p==='/api/export'){const [t,m,rr]=await Promise.all([e.DB.prepare('SELECT * FROM teams WHERE is_fifa_member=1 AND active=1').all(),e.DB.prepare('SELECT m.* FROM matches m JOIN teams h ON h.id=m.home_team_id JOIN teams a ON a.id=m.away_team_id WHERE h.is_fifa_member=1 AND h.active=1 AND a.is_fifa_member=1 AND a.active=1').all(),e.DB.prepare('SELECT r.* FROM rankings r JOIN teams t ON t.id=r.team_id WHERE t.is_fifa_member=1 AND t.active=1').all()]);return j({metadata:{generated_at:new Date().toISOString(),version:VERSION,sources:cfg(e),progress:await progress(e)},teams:t.results,matches:m.results,rankings:rr.results})}if(p==='/api/models'&&r.method==='GET'){const id=Number(u.searchParams.get('id')||0);if(id){const x=await e.DB.prepare('SELECT * FROM model_runs WHERE id=?').bind(id).first<any>();return x?j(x):j({error:'model run not found'},404)}const q=await e.DB.prepare('SELECT * FROM model_runs ORDER BY id DESC LIMIT 50').all();return j(q.results)}
 if(p==='/api/models'&&r.method==='POST'){if(!auth(r,e))return j({error:'unauthorized'},401);const b=await r.json() as any,networkType=b.networkType||'win',validation=await modelValidation(e,networkType);if(!validation.ok)return j({ok:false,status:'validation_failed',error:'ERGM 실행 전 데이터 검증에 실패했습니다.',validation},422);const x=await e.DB.prepare(`INSERT INTO model_runs(model_name,network_type,formula,status,diagnostics_json) VALUES(?,?,?,'queued',?) RETURNING id`).bind(b.name||'ERGM',networkType,b.formula||'network ~ edges',JSON.stringify({preflight:validation})).first<any>();if(!x?.id)return j({error:'모형 요청 저장 실패'},500);try{const dispatch=await triggerGithub(e,x.id);await e.DB.prepare(`UPDATE model_runs SET status='dispatched' WHERE id=?`).bind(x.id).run();return j({ok:true,runId:x.id,status:'dispatched',note:'사전검증을 통과하여 GitHub Actions R 분석을 요청했습니다.',dispatch,validation})}catch(err){await e.DB.prepare(`UPDATE model_runs SET status='dispatch_failed',diagnostics_json=? WHERE id=?`).bind(JSON.stringify({preflight:validation,error:String(err)}),x.id).run();return j({ok:false,runId:x.id,status:'dispatch_failed',error:err instanceof Error?err.message:String(err),validation},502)}}
