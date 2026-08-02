@@ -222,7 +222,21 @@ $('#normalizeBtn').onclick=withBusy($('#normalizeBtn'),async()=>{
   $('#log').textContent=JSON.stringify(d,null,2);await init();
 },{loadingText:'정규화 중...'});
 
-function formula(){const terms=$$('.term:checked').map(x=>x.value);const f=`network ~ ${terms.join(' + ')||'edges'}`;$('#formula').textContent=f;return f}$$('.term').forEach(x=>x.onchange=formula);formula();
+function formula(){const terms=$$('.term:checked').map(x=>x.value);const f=`network ~ ${terms.join(' + ')||'edges'}`;$('#formula').textContent=f;return f}$$('.term').forEach(x=>x.onchange=formula);
+// v37: mutual(상호성)은 방향성 있는 "승리 네트워크"에서만 통계적으로 의미가 있습니다.
+// "경기 네트워크"(무방향)를 고르고 mutual을 체크한 채로 실행하면, R이 자동으로 이 항을
+// 빼고 다시 적합하기 때문에 요청한 공식과 실제로 추정된 공식이 달라져 혼란을 줍니다.
+// 아예 무방향을 고르면 mutual 체크박스를 비활성화해서 이 혼란을 원천 차단합니다.
+function syncMutualAvailability(){
+  const isMatch=$('#modelNetwork').value==='match',cb=$('#mutualCheckbox'),hint=$('#mutualHint');
+  if(!cb)return;
+  cb.disabled=isMatch;
+  if(isMatch&&cb.checked)cb.checked=false;
+  if(hint)hint.style.display=isMatch?'inline':'none';
+  formula();
+}
+$('#modelNetwork').onchange=syncMutualAvailability;
+syncMutualAvailability();
 
 function renderGithubDiag(d){const checks=(d.checks||[]).map(x=>`<li><b>${x.name}</b> · HTTP ${x.status??'-'} · <span class="${x.ok?'good':'bad'}">${x.ok?'정상':'실패'}</span>${x.message?` · ${x.message}`:''}</li>`).join('');$('#githubDiagResult').innerHTML=`<b class="${d.ok?'good':'bad'}">${d.ok?'GitHub 연결 정상':'GitHub 연결 점검 필요'}</b><p>대상 저장소: <code>${d.owner||'-'}/${d.repo||'-'}</code> · 워크플로: <code>${d.workflow||'-'}</code> · 방식: <code>${d.dispatchMode||'-'}</code></p><ul>${checks}</ul><small>${d.recommendation||''}</small>`}
 $('#githubDiagBtn').onclick=withBusy($('#githubDiagBtn'),async()=>{
